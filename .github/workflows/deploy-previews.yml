@@ -1,0 +1,155 @@
+name: Deploy PR Previews
+
+on:
+  workflow_run:
+    workflows: ["Build Documentation"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: write
+
+env:
+  PREVIEWS_REPOSITORY: PedestrianDynamics/jupedsim-pr-previews
+  PREVIEWS_BASE_URL: https://jupedsim-pr-previews.pedestriandynamics.org
+
+jobs:
+  deploy-preview:
+    name: Deploy PR preview
+    if: |
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve PR number
+        id: pr
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // List open PRs whose head is <fork-owner>:<branch>. The payload's
+            // own pull_requests list cannot be used: it is empty for fork PRs.
+            const run = context.payload.workflow_run;
+            const head = `${run.head_repository.owner.login}:${run.head_branch}`;
+
+            const { data: prs } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              head,
+            });
+
+            const pr = prs[0];
+            if (!pr) {
+              core.setFailed(`No open PR found for head ${head}`);
+              return;
+            }
+            core.info(`Head ${head} belongs to PR #${pr.number}`);
+            core.setOutput('number', pr.number);
+
+            // The PR moved on since this build started. A newer build is
+            // already running for the new head, so publishing these docs
+            // would be stale (and could overwrite newer ones). Skip.
+            if (pr.head.sha !== run.head_sha) {
+              const msg = `Skipping preview for PR #${pr.number}: built ${run.head_sha}, PR head is now ${pr.head.sha}`;
+              core.notice(msg);
+              await core.summary.addRaw(`:fast_forward: ${msg}`).write();
+              core.setOutput('deploy', 'false');
+              return;
+            }
+            core.setOutput('deploy', 'true');
+
+      - name: Checkout previews repository
+        if: steps.pr.outputs.deploy == 'true'
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ env.PREVIEWS_REPOSITORY }}
+          token: ${{ secrets.JUPEDSIM_PR_PREVIEWS_TOKEN }}
+          ref: main
+          path: previews
+
+      - name: Download documentation artifact
+        if: steps.pr.outputs.deploy == 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: documentation
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: ${{ runner.temp }}/html
+
+      - name: Commit and push preview
+        if: steps.pr.outputs.deploy == 'true'
+        working-directory: previews
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Deploys for different PRs run in parallel and share one branch, so
+          # a push can be rejected as non-fast-forward. On rejection, restart
+          # from the current remote tip and re-stage the preview.
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+
+            target="pull-requests/$PR_NUMBER"
+            rm -rf "$target"
+            mkdir -p "$target"
+            cp -r "$RUNNER_TEMP/html/." "$target/"
+
+            git add pull-requests
+            git diff --cached --quiet || git commit -m "docs: preview for PR #$PR_NUMBER"
+
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "Push rejected (attempt $attempt), retrying"
+            sleep $((attempt * 5))
+          done
+
+          echo "::error::Failed to push preview after 5 attempts"
+          exit 1
+
+      - name: Update PR body with preview link
+        if: steps.pr.outputs.deploy == 'true'
+        uses: actions/github-script@v9
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          PREVIEW_URL: ${{ env.PREVIEWS_BASE_URL }}/pull-requests/${{ steps.pr.outputs.number }}/
+          BUILT_SHA: ${{ github.event.workflow_run.head_sha }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumber = Number(process.env.PR_NUMBER);
+            if (!Number.isInteger(prNumber) || prNumber <= 0) {
+              core.setFailed(`Invalid PR number: ${process.env.PR_NUMBER}`);
+              return;
+            }
+            const url = process.env.PREVIEW_URL;
+            const builtSha = process.env.BUILT_SHA.slice(0, 7);
+
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+
+            const start = '<!-- PREVIEW-URL-2-START -->';
+            const end = '<!-- PREVIEW-URL-2-END -->';
+            const snippet = `${start}\nNew preview: ${url} (built from ${builtSha})\n${end}`;
+
+            const original = pr.body || '';
+            const updated = original.includes(start)
+              ? original.replace(new RegExp(`${start}[\\s\\S]*?${end}`), snippet)
+              : `${original}\n\n${snippet}`;
+
+            await github.rest.pulls.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+              body: updated,
+            });
+
+            core.info(`Updated PR #${prNumber} with preview link: ${url}`);

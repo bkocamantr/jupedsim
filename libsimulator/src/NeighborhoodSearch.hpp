@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #pragma once
-
+#include "GenericAgent.hpp"
 #include "HashCombine.hpp"
-#include "IteratorPair.hpp"
 #include "Point.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <concepts>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
 #include <iterator>
 #include <unordered_map>
 #include <vector>
@@ -58,7 +62,7 @@ struct std::hash<Grid2DIndex> {
 template <typename Value>
 class NeighborhoodSearch
 {
-    using Grid = std::unordered_map<Grid2DIndex, std::vector<Value>>;
+    using Grid = std::unordered_map<Grid2DIndex, std::vector<const Value*>>;
 
     double _cellSize;
     Grid _grid{};
@@ -76,9 +80,9 @@ public:
 
     void AddAgent(const Value& item)
     {
-        auto index = getIndex(item.pos);
+        auto index = getIndex(item.location.xy());
         auto& vec = _grid[index];
-        vec.push_back(item);
+        vec.push_back(&item);
     }
 
     void RemoveAgent(const Value& item)
@@ -96,21 +100,20 @@ public:
         throw SimulationError("Unknown agent id {}", item.id);
     }
 
-    void Update(const std::vector<Value>& items)
+    void Update(const AgentContainer<Value>& items)
     {
         _grid.clear();
         for(const auto& item : items) {
-            auto index = getIndex(item.pos);
+            auto index = getIndex(item.location.xy());
             auto& vec = _grid[index];
-            vec.push_back(item);
+            vec.push_back(&item);
         }
     }
 
-    std::vector<Value> GetNeighboringAgents(Point pos, double radius) const
+    /// Calls 'fn' for every item within 'radius' of 'pos'.
+    template <std::invocable<const Value&> Fn>
+    void ForEachInRange(Point pos, double radius, Fn&& fn) const
     {
-        std::vector<Value> result{};
-        result.reserve(128);
-
         const auto posIdx = getIndex(pos);
         const auto offset = static_cast<int32_t>(std::ceil(radius / _cellSize));
         const int32_t xMin = posIdx.idx - offset;
@@ -125,13 +128,12 @@ public:
                 auto it = _grid.find({x, y});
                 if(it != _grid.cend()) {
                     for(const auto& item : it->second) {
-                        if(DistanceSquared(item.pos, pos) <= radiusSquared) {
-                            result.emplace_back(item);
+                        if(DistanceSquared(item->location.xy(), pos) <= radiusSquared) {
+                            fn(*item);
                         }
                     }
                 }
             }
         }
-        return result;
     }
 };

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #pragma once
 
+#include <fmt/core.h>
 #include <fmt/format.h>
 
-#include <cmath>
-#include <iostream>
-#include <string>
+#include <limits>
+#include <tuple>
 
 class Point
 {

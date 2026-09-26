@@ -1,22 +1,22 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #pragma once
 
+#include "AgentView.hpp"
+#include "EnvironmentQuery.hpp"
 #include "GenericAgent.hpp"
-#include "IteratorPair.hpp"
-#include "NeighborhoodSearch.hpp"
+#include "Geometry/Geometry.hpp"
 #include "OperationalModel.hpp"
 #include "OperationalModelType.hpp"
-#include "SimulationError.hpp"
 
-#include <boost/iterator/zip_iterator.hpp>
-
+#include <algorithm>
 #include <iterator>
 #include <memory>
-#include <vector>
+#include <utility>
 
 class OperationalDecisionSystem
 {
     std::unique_ptr<OperationalModel> _model{};
+    AgentContainer<GenericAgent> _next{};
 
 public:
     OperationalDecisionSystem(std::unique_ptr<OperationalModel>&& model) : _model(std::move(model))
@@ -34,36 +34,32 @@ public:
     Run(double dT,
         double /*t_in_sec*/,
         const NeighborhoodSearch<GenericAgent>& neighborhoodSearch,
-        const CollisionGeometry& geometry,
-        std::vector<GenericAgent>& agents) const
+        const Geometry& geometry,
+        AgentContainer<GenericAgent>& agents)
     {
-        std::vector<std::optional<OperationalModelUpdate>> updates{};
-        updates.reserve(agents.size());
-
-        std::transform(
-            std::begin(agents),
-            std::end(agents),
-            std::back_inserter(updates),
-            [this, &dT, &geometry, &neighborhoodSearch](const auto& agent) {
-                return _model->ComputeNewPosition(dT, agent, geometry, neighborhoodSearch);
-            });
-
-        std::for_each(
-            boost::make_zip_iterator(boost::make_tuple(std::begin(agents), std::begin(updates))),
-            boost::make_zip_iterator(boost::make_tuple(std::end(agents), std::end(updates))),
-            [this](auto tup) {
-                auto& [agent, update] = tup;
-                if(update) {
-                    _model->ApplyUpdate(*update, agent);
-                }
-            });
+        const EnvironmentQuery envQuery{geometry, neighborhoodSearch};
+        _next.clear();
+        std::copy(std::begin(agents), std::end(agents), std::back_inserter(_next));
+        for(size_t index = 0; index < agents.size(); ++index) {
+            const auto& current = agents[index];
+            auto& next = _next[index];
+            const AgentStep step{envQuery, current, dT};
+            const Point movement = _model->ComputeNextState(current.state, next.state, step);
+            next.location.move_on_surface(movement);
+        }
+        // Swap in the computed generation. This is safe because no caller retains
+        // pointers/references across an iteration (Python-side agent handles resolve per
+        // access) and Simulation::Iterate rebuilds the neighborhood grid right after this
+        // step.
+        agents.swap(_next);
     }
 
     void ValidateAgent(
         const GenericAgent& agent,
         const NeighborhoodSearch<GenericAgent>& neighborhoodSearch,
-        const CollisionGeometry& geometry) const
+        const Geometry& geometry) const
     {
-        _model->CheckModelConstraint(agent, neighborhoodSearch, geometry);
+        const EnvironmentQuery envQuery{geometry, neighborhoodSearch};
+        _model->CheckModelConstraint(agent, AgentView{envQuery, agent});
     }
 };

@@ -14,7 +14,7 @@ from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
 
 min_cpp_standard = 20
-min_cmake_version = "3.19"
+min_cmake_version = "3.22"
 
 # Read version number from CMakeLists.txt
 with open("CMakeLists.txt", "r", encoding="utf-8") as cmakelist:
@@ -48,7 +48,9 @@ def check_cmake():
         for min_version, found_version in zip(
             min_cmake_version.split("."), found_cmake_version.groups()
         ):
-            if found_version < min_version:
+            if found_version > min_version:
+                return True
+            elif found_version < min_version:
                 return False
     except Exception as _:
         return False
@@ -142,7 +144,6 @@ class CMakeBuild(build_ext):
         cmake_args = [
             f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={extdir}{os.sep}",
             f"-DCMAKE_BUILD_TYPE={cfg}",  # not used on MSVC, but no harm
-            "-DCMAKE_UNITY_BUILD=ON",
             f"-DPython_EXECUTABLE={sys.executable}",
         ]
 
@@ -248,10 +249,11 @@ setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     license_files=("LICENSE",),
+    license="LGPL-3.0-or-later",
     ext_modules=[CMakeExtension("python_bindings_jupedsim")],
     cmdclass={"build_ext": CMakeBuild},
     zip_safe=False,
-    python_requires=">=3.10,<3.14",
+    python_requires=">=3.10,<3.15",
     packages=[
         "jupedsim",
         "jupedsim.models",
@@ -295,6 +297,7 @@ setup(
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
         "Programming Language :: Python :: 3.13",
+        "Programming Language :: Python :: 3.14",
         "Intended Audience :: Developers",
         "Intended Audience :: Science/Research",
     ],

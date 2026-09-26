@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #pragma once
-#include "AnticipationVelocityModelData.hpp"
-#include "CollisionFreeSpeedModelData.hpp"
-#include "CollisionFreeSpeedModelV2Data.hpp"
-#include "GeneralizedCentrifugalForceModelData.hpp"
-#include "OperationalModel.hpp"
+#include "Geometry/Location.hpp"
+#include "OperationalModels/OperationalModelState.hpp"
+#include "OperationalModels/OperationalModelType.hpp"
 #include "Point.hpp"
-#include "SocialForceModelData.hpp"
 #include "UniqueID.hpp"
 #include "Visitor.hpp"
 
-#include <memory>
+#include <fmt/core.h>
+
+#include <deque>
+#include <optional>
+#include <utility>
 class Journey;
 class BaseStage;
 
@@ -21,39 +22,62 @@ struct GenericAgent {
     jps::UniqueID<Journey> journeyId{jps::UniqueID<Journey>::Invalid};
     jps::UniqueID<BaseStage> stageId{jps::UniqueID<BaseStage>::Invalid};
 
+    /// Where the agent stands. Only the geometry can say that, so only it can build one.
+    Location location;
+
     // This is evaluated by the "operational level"
-    Point destination{};
-    Point target{};
+    Point nextTarget{};
+    Location finalTarget;
 
-    // Agent fields common for all models
-    Point pos{};
-    Point orientation{};
-
-    using Model = std::variant<
-        GeneralizedCentrifugalForceModelData,
-        CollisionFreeSpeedModelData,
-        CollisionFreeSpeedModelV2Data,
-        AnticipationVelocityModelData,
-        SocialForceModelData>;
-    Model model{};
+    OperationalModelState state{};
 
     GenericAgent(
         ID id_,
         jps::UniqueID<Journey> journeyId_,
         jps::UniqueID<BaseStage> stageId_,
-        Point pos_,
-        Point orientation_,
-        Model model_)
+        Location location_,
+        OperationalModelState state_)
         : id(id_ != ID::Invalid ? id_ : ID{})
         , journeyId(journeyId_)
         , stageId(stageId_)
-        , target(pos_)
-        , pos(pos_)
-        , orientation(orientation_)
-        , model(std::move(model_))
+        , location(location_)
+        , finalTarget(location_)
+        , state(std::move(state_))
     {
     }
 };
+
+/// Maps agent model data to the operational model type it belongs to. Kept
+/// exhaustive on purpose: adding a model type will not compile until the
+/// mapping is extended.
+inline OperationalModelType ModelTypeOf(const OperationalModelState& model)
+{
+    return std::visit(
+        overloaded{
+            [](const GeneralizedCentrifugalForceModelState&) {
+                return OperationalModelType::GENERALIZED_CENTRIFUGAL_FORCE;
+            },
+            [](const CollisionFreeSpeedModelState&) {
+                return OperationalModelType::COLLISION_FREE_SPEED;
+            },
+            [](const CollisionFreeSpeedModelV2State&) {
+                return OperationalModelType::COLLISION_FREE_SPEED_V2;
+            },
+            [](const CollisionFreeSpeedModelV3State&) {
+                return OperationalModelType::COLLISION_FREE_SPEED_V3;
+            },
+            [](const AnticipationVelocityModelState&) {
+                return OperationalModelType::ANTICIPATION_VELOCITY_MODEL;
+            },
+            [](const SocialForceModelState&) { return OperationalModelType::SOCIAL_FORCE; },
+            [](const WarpDriverModelState&) { return OperationalModelType::WARP_DRIVER; },
+            [](const CustomModelState&) { return OperationalModelType::CUSTOM_MODEL; }},
+        model);
+}
+
+template <class Agent>
+using AgentContainer = std::deque<Agent>;
+
 template <>
 struct fmt::formatter<GenericAgent> {
     constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
@@ -62,49 +86,19 @@ struct fmt::formatter<GenericAgent> {
     auto format(const GenericAgent& agent, FormatContext& ctx) const
     {
         return std::visit(
-            overloaded{
-                [&ctx, &agent](const GeneralizedCentrifugalForceModelData& m) {
-                    return fmt::format_to(
-                        ctx.out(),
-                        "Agent[id={}, journey={}, stage={}, destination={}, waypoint={}, pos={}, "
-                        "orientation={}, model={})",
-                        agent.id,
-                        agent.journeyId,
-                        agent.stageId,
-                        agent.destination,
-                        agent.target,
-                        agent.pos,
-                        agent.orientation,
-                        m);
-                },
-                [&ctx, &agent](const CollisionFreeSpeedModelData& m) {
-                    return fmt::format_to(
-                        ctx.out(),
-                        "Agent[id={}, journey={}, stage={}, destination={}, waypoint={}, pos={}, "
-                        "orientation={}, model={})",
-                        agent.id,
-                        agent.journeyId,
-                        agent.stageId,
-                        agent.destination,
-                        agent.target,
-                        agent.pos,
-                        agent.orientation,
-                        m);
-                }},
-            [&ctx, &agent](const SocialForceModelData& m) {
+            [&ctx, &agent](const auto& m) {
                 return fmt::format_to(
                     ctx.out(),
                     "Agent[id={}, journey={}, stage={}, destination={}, waypoint={}, pos={}, "
-                    "orientation={}, model={})",
+                    "state={})",
                     agent.id,
                     agent.journeyId,
                     agent.stageId,
-                    agent.destination,
-                    agent.target,
-                    agent.pos,
-                    agent.orientation,
+                    agent.nextTarget,
+                    agent.finalTarget.xy(),
+                    agent.location.xy(),
                     m);
             },
-            agent.model);
+            agent.state);
     }
 };

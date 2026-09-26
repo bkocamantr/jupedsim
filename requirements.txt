@@ -9,9 +9,10 @@ build
 setuptools
 
 # test deps
-pytest~=8.3
+pytest~=9.1
 pandas~=2.2
 
 # ci deps
-jinja2
-ruff
+jinja2~=3.1
+ruff~=0.14
+pre-commit~=4.5

@@ -3,12 +3,14 @@
 
 #include "AgentRemovalSystem.hpp"
 #include "GenericAgent.hpp"
+#include "Geometry/Geometry.hpp"
 #include "Journey.hpp"
 #include "NeighborhoodSearch.hpp"
 #include "OperationalDecisionSystem.hpp"
 #include "OperationalModel.hpp"
 #include "OperationalModelType.hpp"
 #include "Point.hpp"
+#include "RoutingEngine.hpp"
 #include "SimulationClock.hpp"
 #include "Stage.hpp"
 #include "StageDescription.hpp"
@@ -16,11 +18,13 @@
 #include "StageSystem.hpp"
 #include "StrategicalDesicionSystem.hpp"
 #include "TacticalDecisionSystem.hpp"
-#include "Tracing.hpp"
+#include "Timing.hpp"
 
-#include <boost/iterator/zip_iterator.hpp>
-
+#include <cstddef>
+#include <cstdint>
+#include <map>
 #include <memory>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -34,22 +38,27 @@ class Simulation
     StageManager _stageManager{};
     StageSystem _stageSystem{};
     NeighborhoodSearch<GenericAgent> _neighborhoodSearch{2.2};
-    std::unordered_map<
-        CollisionGeometry::ID,
-        std::tuple<std::unique_ptr<CollisionGeometry>, std::unique_ptr<RoutingEngine>>>
-        geometries{};
-    RoutingEngine* _routingEngine;
-    CollisionGeometry* _geometry;
-    std::vector<GenericAgent> _agents;
+    std::unique_ptr<Geometry> _geometry{};
+    std::unique_ptr<RoutingEngine> _routingEngine{};
+    AgentContainer<GenericAgent> _agents;
     std::vector<GenericAgent::ID> _removedAgentsInLastIteration;
     std::unordered_map<Journey::ID, std::unique_ptr<Journey>> _journeys;
-    PerfStats _perfStats{};
+    Timer _timer{};
+    /// Set for the duration of Iterate(); mutating entry points must not run while the
+    /// iteration pipeline works on the agent containers.
+    bool _iterating{false};
+    enum LogLevel { General = 1, Detailed = 2, Debug = 3 };
+
+    void ThrowIfIterating(const char* operation) const;
 
 public:
+    /// Takes the geometry over: after this the caller no longer owns it. `Geo()` hands out a
+    /// borrowed reference for as long as the simulation lives.
     Simulation(
         std::unique_ptr<OperationalModel>&& operationalModel,
-        std::unique_ptr<CollisionGeometry>&& geometry,
+        std::unique_ptr<Geometry>&& geometry,
         double dT);
+
     Simulation(const Simulation& other) = delete;
     Simulation& operator=(const Simulation& other) = delete;
     Simulation(Simulation&& other) = delete;
@@ -57,10 +66,10 @@ public:
     ~Simulation() = default;
     const SimulationClock& Clock() const;
     void SetTracing(bool on);
-    PerfStats GetLastStats() const;
     void Iterate();
     Journey::ID AddJourney(const std::map<BaseStage::ID, TransitionDescription>& stages);
-    BaseStage::ID AddStage(const StageDescription stageDescription);
+    /// @param z_hint "stage point" is the closest z on the surface related to @p z_hint
+    BaseStage::ID AddStage(const StageDescription stageDescription, double z_hint = 0.0);
     void MarkAgentForRemoval(GenericAgent::ID id);
     const std::vector<GenericAgent::ID>& RemovedAgents() const;
     size_t AgentCount() const;
@@ -73,15 +82,30 @@ public:
     /// Returns IDs of all agents inside the defined polygon
     /// @param polygon Required to be a simple convex polygon with CCW ordering.
     std::vector<GenericAgent::ID> AgentsInPolygon(const std::vector<Point>& polygon);
-    GenericAgent::ID AddAgent(GenericAgent&& agent);
+    /// @param z_hint Agent will land on the closest z on the surface matching @p position.
+    GenericAgent::ID AddAgent(
+        Journey::ID journeyId,
+        BaseStage::ID stageId,
+        Point position,
+        OperationalModelState model,
+        double z_hint = 0.0);
+    /// The place at @p x, @p y on the sheet closest to @p z_hint.
+    /// @throws SimulationError if no walkable sheet lies within the hint's tolerance.
+    Location GetLocation(double x, double y, double z_hint = 0.0) const;
+    /// Raycast 2D @p target along z-axis. The closest intersection with the geometry to agent's
+    /// z coordinate is the one taken.
+    void SetAgentTarget(GenericAgent::ID id, Point target);
+    void SetAgentTarget(GenericAgent::ID id, const Location& target);
     const GenericAgent& Agent(GenericAgent::ID id) const;
     GenericAgent& Agent(GenericAgent::ID id);
-    std::vector<GenericAgent>& Agents();
+    AgentContainer<GenericAgent>& Agents();
     OperationalModelType ModelType() const;
     StageProxy Stage(BaseStage::ID stageId);
-    CollisionGeometry Geo() const;
-    void SwitchGeometry(std::unique_ptr<CollisionGeometry>&& geometry);
-
-private:
-    void ValidateGeometry(const std::unique_ptr<CollisionGeometry>& geometry) const;
+    /// The geometry this simulation runs on. Borrowed: it lives as long as the simulation.
+    const Geometry& Geo() const;
+    void PushTimer(const std::string_view name, size_t probe_log_level = 0);
+    void PopTimer(const std::string_view name);
+    void SetTimerLogLevel(int level) { _timer.setLogLevel(level); };
+    TimerEntry::duration_type GetTimerDuration(const std::string_view name) const;
+    std::map<std::string, TimerEntry::duration_type> GetTimerDurations() const;
 };

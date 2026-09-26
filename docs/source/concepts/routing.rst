@@ -105,7 +105,7 @@ An exit located in the polygon :math:`(-0.2, -1.9), (0.2, -1.9), (0.2, -1.7), (-
 .. note::
 
     When adding exits close to the boundary of the walkable area make sure that there is enough room for the agents to enter the exit polygon.
-    Otherwise they will not be able to each the exit at all.
+    Otherwise they will not be able to reach the exit at all.
 
 .. warning::
 
@@ -267,7 +267,7 @@ Round-robin transition
 It is also possible to model a decision making process and split the agents at a stage, with a round-robin transition.
 Here, the agents will proceed in a weighted round-robin manner.
 E.g., when defining a round-robin transition with three outgoing stages and the corresponding weights 10, 5, 1, the first 10 agents to make a choice will continue with the first given stage.
-The next 4 with the second one, and the next agent will continue with the third stage.
+The next 5 with the second one, and the next agent will continue with the third stage.
 
 After this, the cycle restarts with the first stage.
 
@@ -337,7 +337,7 @@ It will move towards the specified point and if the point is reached, it will co
 .. code:: python
 
     agent = simulation.agent(direct_steering_agent_id)
-    agent.target = (-10, -10)
+    agent.final_target = (-10, -10)
 
 .. note::
 

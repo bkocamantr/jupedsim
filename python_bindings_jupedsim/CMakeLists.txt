@@ -1,33 +1,48 @@
 add_library(py_jupedsim MODULE
+    agent.cpp
+    agent_view.cpp
+    anticipation_velocity_model.cpp
     bindings_jupedsim.cpp
     build_info.cpp
+    collision_free_speed_model.cpp
+    collision_free_speed_model_v2.cpp
+    collision_free_speed_model_v3.cpp
     conversion.cpp
     conversion.hpp
     generalized_centrifugal_force_model.cpp
-    collision_free_speed_model.cpp
-    collision_free_speed_model_v2.cpp
-    anticipation_velocity_model.cpp
-    social_force_model.cpp
+    geometry.cpp
+    journey.cpp
     logging.cpp
     logging.hpp
-    trace.cpp
-    wrapper.hpp
-    geometry.cpp
+    python_model.cpp
+    python_model.hpp
+    floorfield.cpp
     routing.cpp
     simulation.cpp
-    agent.cpp
+    social_force_model.cpp
     stage.cpp
-    journey.cpp
+    temporary/boundary_index.cpp
+    trace.cpp
     transition.cpp
+    type_casters.hpp
+    walkable_surface.cpp
+    warp_driver_model.cpp
+)
+
+target_include_directories(py_jupedsim PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_link_libraries(py_jupedsim
     PRIVATE
         pybind11::module
         pybind11::windows_extras
+        simulator
         fmt::fmt
-        jupedsim_obj
         common
+        perfetto
+        project_options
+        floorfield_cxx
 )
 
 pybind11_extension(py_jupedsim)
@@ -41,7 +56,4 @@ set_target_properties(py_jupedsim
     PROPERTIES
         CXX_VISIBILITY_PRESET "hidden"
         CUDA_VISIBILITY_PRESET "hidden"
-        INTERPROCEDURAL_OPTIMIZATION ${USE_IPO}
-        INTERPROCEDURAL_OPTIMIZATION_DEBUG OFF
 )
-

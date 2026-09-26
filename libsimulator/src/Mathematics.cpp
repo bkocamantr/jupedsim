@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "Mathematics.hpp"
 
+#include "Point.hpp"
+
 #include <cassert>
+#include <cmath>
+#include <complex>
 
 // ok that is not perfect. For a profound discussion see
 // http://randomascii.wordpress.com/2012/02/25/comparing-floating-point-numbers-2012-edition/
@@ -65,15 +69,13 @@ std::complex<double> c_cbrt(std::complex<double> x)
 }
 
 Point mollify_e0(
-    const Point& target,
-    const Point& pos,
+    const Point& orientation_to_target,
     double deltaT,
     int orientationDelay,
     const Point& e0)
 {
     constexpr double _tau = 0.5;
-    const Point delta = target - pos;
-    const Point new_e0 = delta.Normalized();
+    const Point new_e0 = orientation_to_target;
     const double t = orientationDelay * deltaT;
 
     // Handover new target

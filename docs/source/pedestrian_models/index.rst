@@ -2,6 +2,11 @@
 Pedestrian Models
 =================
 
+.. toctree::
+   :hidden:
+
+   collision_free_speed_model_v3
+
 JuPedSim allows creating pedestrian simulations with different microscopic
 models. Below is a list of all the models that are currently available. Please
 refer to the links in the respective section for a detailed discussion of the
@@ -26,18 +31,34 @@ speed of the agent. This simplified and computationally efficient model aims to
 mirror real-world pedestrian behaviors while maintaining smooth movement
 dynamics.
 
-The collision-free speed model is available in two variants in JuPedSim. Both
-variants implement the same algorithm but differ when it comes to defining model
-parameters globally vs. per-agent.
+The collision-free speed model is available in three variants in JuPedSim,
+constructed via :class:`~jupedsim.CollisionFreeSpeedModel`,
+:class:`~jupedsim.CollisionFreeSpeedModelV2` and
+:class:`~jupedsim.CollisionFreeSpeedModelV3`. V1 and V2 differ in whether the
+repulsion parameters are global or per-agent: in
+:class:`~jupedsim.CollisionFreeSpeedModel` (V1) the repulsion parameters
+(``strength_neighbor_repulsion``, ``range_neighbor_repulsion``,
+``strength_geometry_repulsion``, ``range_geometry_repulsion``) are model-level
+constructor arguments shared by all agents, whereas in V2 they are per-agent.
+V3 uses a different steering approach (rotational steering with heading
+relaxation).
 
-In :class:`~jupedsim.models.CollisionFreeSpeedModel` neighbor and geometry
-repulsion parameters are global parameters, i.e. all agents use the same values
-and the values are constant over the simulation.
+The per-agent parameters are set when adding an agent (via
+:class:`~jupedsim.CollisionFreeSpeedModelState`,
+:class:`~jupedsim.CollisionFreeSpeedModelV2State` or
+:class:`~jupedsim.CollisionFreeSpeedModelV3State`) and can be changed at any
+time through the agent handle.
 
-In :class:`~jupedsim.models.CollisionFreeSpeedModelV2` neighbor and geometry
-repulsion parameters are per-agent parameters that can be set individually via
-:class:`~jupedsim.models.CollisionFreeSpeedModelV2AgentParameters` and can be
-changed at any time.
+In :class:`~jupedsim.CollisionFreeSpeedModelV3` the same per-agent base
+parameters are available (via
+:class:`~jupedsim.CollisionFreeSpeedModelV3State`), plus rotational steering controls
+(``range_x_scale``, ``range_y_scale``, ``theta_max_upper_bound``)
+and ``agent_buffer``.
+V3 also uses temporal heading relaxation to damp rapid left-right turning
+changes and a tiny deterministic reverse-speed floor to help unblock contact
+situations.
+
+See the `V3 specification <collision_free_speed_model_v3.html>`_ for full details.
 
 A `detailed description
 <https://pedestriandynamics.org/models/collision_free_speed_model/>`_ is
@@ -108,9 +129,9 @@ dynamics.
 
 The parameters of the anticipation velocity model can be defined per-agent.
 
-In :class:`~jupedsim.models.AnticipationVelocityModel` neighbor and wall
+In :class:`~jupedsim.AnticipationVelocityModel` neighbor and wall
 parameters are per-agent parameters that can be set individually via
-:class:`~jupedsim.models.AnticipationVelocityModelAgentParameters` and can be
+:class:`~jupedsim.AnticipationVelocityModelState` and can be
 changed at any time.
 
 For an in-depth explanation of the model, refer to the 
@@ -167,5 +188,49 @@ person force to avoid collisions with obstacles in the environment.
 A `detailed description
 <https://pedestriandynamics.org/models/social_force_model/>`_ is available on
 `PedestrianDynamics`_.
+
+****************
+WarpDriver Model
+****************
+
+The WarpDriver model computes collision-free velocities using probabilistic
+collision fields. Each agent projects its trajectory forward in time, evaluates
+the collision probability with every neighbor via a warped intrinsic field, and
+adjusts its velocity through gradient descent on the resulting probability
+landscape. The model is based on Wolinski, Lin, and Pettré (2016).
+
+The pipeline per agent per timestep:
+**Setup** (project trajectory) → **Perceive** (warp + sample intrinsic field
+per neighbor) → **Solve** (gradient descent via integrals over the collision
+probability landscape).
+
+Key features:
+
+* Probabilistic collision prediction via precomputed intrinsic fields
+* Five composable warp operators for coordinate transforms between agents
+* Gradient-based velocity correction (speed model, not force-based)
+* Stuck detection with lateral detour to break narrow-passage deadlocks
+
+The parameters of the WarpDriver model include model-level parameters (shared
+by all agents: ``sigma``, ``time_horizon``, ``step_size``,
+``time_uncertainty``, ``velocity_uncertainty_x``, ``velocity_uncertainty_y``,
+``num_samples`` and ``rng_seed``, passed to
+:class:`~jupedsim.WarpDriverModel`) and per-agent parameters
+(``desired_speed`` and ``radius``, set via
+:class:`~jupedsim.WarpDriverModelState`) that can be modified at runtime.
+
+See the `full WarpDriver model documentation <warp_driver_model.html>`_ for
+a detailed description of the algorithm, equations, warp operators, and
+parameters.
+
+The original publication: Wolinski, D., Lin, M. C., and Pettré, J. (2016).
+*WarpDriver: Context-Aware Probabilistic Motion Prediction for Crowd
+Simulation*. IEEE Transactions on Visualization and Computer Graphics, 22(12),
+2466–2480.
+
+.. toctree::
+   :hidden:
+
+   warp_driver_model
 
 .. _PedestrianDynamics: https://PedestrianDynamics.org/

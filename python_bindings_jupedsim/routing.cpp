@@ -1,78 +1,49 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
-#include "conversion.hpp"
-#include "wrapper.hpp"
+#include "Geometry/Geometry.hpp"
+#include "Geometry/Location.hpp"
+#include "Geometry/Validation.hpp"
+#include "SimulationError.hpp"
+#include "SurfaceMeshShortestPathRoutingEngine.hpp"
+#include "type_casters.hpp"
 
-#include <cstddef>
-#include <jupedsim/jupedsim.h>
-
+#include <CGAL/Polygon_mesh_processing/IO/polygon_mesh_io.h>
+#include <fmt/format.h>
 #include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
+#include <pybind11/stl.h> // IWYU pragma: keep
 
-#include <algorithm>
 #include <memory>
-#include <tuple>
-#include <vector>
+#include <string>
+#include <utility>
 
 namespace py = pybind11;
 
 void init_routing(py::module_& m)
 {
-    py::class_<JPS_RoutingEngine_Wrapper>(m, "RoutingEngine")
-        .def(py::init([](const JPS_Geometry_Wrapper& geo) {
-            return std::make_unique<JPS_RoutingEngine_Wrapper>(
-                JPS_RoutingEngine_Create(geo.handle));
-        }))
-        .def(
-            "compute_waypoints",
-            [](const JPS_RoutingEngine_Wrapper& w,
-               std::tuple<double, double> from,
-               std::tuple<double, double> to) {
-                auto intoJPS_Point = [](const auto p) {
-                    return JPS_Point{std::get<0>(p), std::get<1>(p)};
-                };
-                auto waypoints = JPS_RoutingEngine_ComputeWaypoint(
-                    w.handle, intoJPS_Point(from), intoJPS_Point(to));
-                std::vector<std::tuple<double, double>> result;
-                result.reserve(waypoints.len);
-                std::transform(
-                    waypoints.points,
-                    waypoints.points + waypoints.len,
-                    std::back_inserter(result),
-                    [](const auto& p) { return std::make_tuple(p.x, p.y); });
-                JPS_Path_Free(waypoints);
-                return result;
-            })
-        .def(
-            "is_routable",
-            [](const JPS_RoutingEngine_Wrapper& w, std::tuple<double, double> p) {
-                return JPS_RoutingEngine_IsRoutable(w.handle, intoJPS_Point(p));
-            })
-        .def("mesh", [](const JPS_RoutingEngine_Wrapper& w) {
-            auto mesh = JPS_RoutingEngine_Mesh(w.handle);
-            using Pt = std::tuple<double, double>;
-            using Vert = std::vector<Pt>;
-            using Ind = std::vector<uint16_t>;
-            using Polys = std::vector<Ind>;
-            auto result = std::tuple<Vert, Polys>{};
-            auto& [vertices, polygons] = result;
-            vertices.reserve(mesh.vertices_len);
-            std::transform(
-                mesh.vertices,
-                mesh.vertices + mesh.vertices_len,
-                std::back_inserter(vertices),
-                [](const auto& v) { return std::make_tuple(v.x, v.y); });
-            polygons.reserve(mesh.polygons_len);
-            for(size_t polygon_index = 0; polygon_index < mesh.polygons_len; ++polygon_index) {
-                polygons.emplace_back();
-                const auto desc = mesh.polygons[polygon_index];
-                polygons.back().reserve(desc.len);
-                polygons.back().insert(
-                    std::end(polygons.back()),
-                    mesh.indices + desc.offset,
-                    mesh.indices + desc.offset + desc.len);
-            }
-
-            JPS_Mesh_Free(mesh);
-            return result;
+    // A place on the surface, handed out by the simulation and passed back to it. Read-only and
+    // deliberately narrow: no region ids, no face handles -- the coordinates are all a caller
+    // can do anything with, everything else is the geometry's business.
+    py::class_<Location>(m, "Location")
+        .def_property_readonly("x", [](const Location& l) { return l.xy().x; })
+        .def_property_readonly("y", [](const Location& l) { return l.xy().y; })
+        .def_property_readonly("z", &Location::z)
+        .def("__repr__", [](const Location& l) {
+            return fmt::format("Location({}, {}, {})", l.xy().x, l.xy().y, l.z());
         });
+
+    py::class_<RoutingEngine>(m, "RoutingEngine")
+        .def("is_valid_location", &RoutingEngine::IsValidLocation)
+        .def("get_shortest_path", &RoutingEngine::GetShortestPath)
+        .def("get_orientation", &RoutingEngine::GetOrientation)
+        .def("wall_clearance", &RoutingEngine::WallClearance);
+
+    py::class_<SurfaceMeshShortestPathRoutingEngine, RoutingEngine>(
+        m, "SurfaceMeshShortestPathRoutingEngine")
+        // The engine borrows the geometry; keep_alive ties the Python-side
+        // Geometry's lifetime to the engine so the borrow can't dangle.
+        .def(
+            py::init([](const Geometry& geometry) {
+                return std::make_unique<SurfaceMeshShortestPathRoutingEngine>(geometry);
+            }),
+            py::arg("geometry"),
+            py::keep_alive<1, 2>());
 }

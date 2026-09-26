@@ -2,13 +2,10 @@
 #pragma once
 
 #include "Journey.hpp"
-#include "Stage.hpp"
 #include "StageManager.hpp"
 
 #include <memory>
-#include <tuple>
 #include <unordered_map>
-#include <vector>
 
 class StrategicalDecisionSystem
 {
@@ -27,7 +24,7 @@ public:
     {
         for(auto& agent : agents) {
             const auto [target, id] = journeys.at(agent.journeyId)->Target(agent);
-            agent.target = target;
+            agent.finalTarget = target;
             stageManager.MigrateAgent(agent.stageId, id);
             agent.stageId = id;
         }

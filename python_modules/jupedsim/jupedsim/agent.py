@@ -1,25 +1,69 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
 import jupedsim.native as py_jps
-from jupedsim.models.anticipation_velocity_model import (
-    AnticipationVelocityModelState,
-)
-from jupedsim.models.collision_free_speed import CollisionFreeSpeedModelState
-from jupedsim.models.collision_free_speed_v2 import (
-    CollisionFreeSpeedModelV2State,
-)
-from jupedsim.models.generalized_centrifugal_force import (
-    GeneralizedCentrifugalForceModelState,
-)
-from jupedsim.models.social_force import SocialForceModelState
+from jupedsim.location import Location
+
+if TYPE_CHECKING:
+    from jupedsim.simulation import Simulation
+
+
+class _ModelStateHandle:
+    """Handle to the model specific state of one agent.
+
+    Attribute reads and writes are forwarded to the agent's live model state
+    inside the simulation. The agent is resolved freshly on every access;
+    accessing the state of an agent that no longer exists raises
+    :class:`~jupedsim.SimulationError`.
+
+    Internals are private on purpose: no reference into the simulation's
+    agent storage is ever retained beyond a single attribute access.
+    """
+
+    def __init__(self, simulation: Simulation, agent_id: int) -> None:
+        """Do not use.
+
+        Model state handles are obtained via :attr:`Agent.state`.
+        """
+        object.__setattr__(self, "_ModelStateHandle__simulation", simulation)
+        object.__setattr__(self, "_ModelStateHandle__id", agent_id)
+
+    def __resolve(self):
+        # Transient reference: only valid for the duration of one attribute
+        # access, never stored.
+        return self.__simulation._obj.agent(self.__id).state
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self.__resolve(), name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        state = self.__resolve()
+        if not hasattr(state, name):
+            raise AttributeError(
+                f"'{type(state).__name__}' has no attribute '{name}'"
+            )
+        setattr(state, name, value)
+
+    def __dir__(self):
+        return sorted(
+            set(super().__dir__())
+            | {n for n in dir(self.__resolve()) if not n.startswith("_")}
+        )
+
+    def __repr__(self) -> str:
+        return f"ModelStateHandle(agent_id={self.__id})"
 
 
 class Agent:
-    """Represents an Agent in the simulation.
+    """Handle to an agent in a :class:`~jupedsim.simulation.Simulation`.
 
-    Agent objects are always retrieved from the simulation and never created directly.
-
-    Agents can be accessed with:
+    Agent handles are always retrieved from the simulation and never created
+    directly:
 
     .. code:: python
 
@@ -29,99 +73,141 @@ class Agent:
         # all agents as iterator
         sim.agents()
 
-        # agents in a specific distance to a point as iterator
+        # agents in a specific distance to a point
         sim.agents_in_range(position, distance)
 
-        # agents in a polygon as iterator
+        # agents in a polygon
         sim.agents_in_polygon(polygon)
+
+    A handle stores only the simulation and the agent id. Every attribute
+    read or write resolves the agent freshly through the simulation, so
+    handles remain valid across calls to
+    :meth:`~jupedsim.simulation.Simulation.iterate`. Accessing a handle whose
+    agent no longer exists raises :class:`~jupedsim.SimulationError`.
+
+    Mutation through properties is supported, e.g.:
+
+    .. code:: python
+
+        agent.final_target = (1.0, 2.0)
+        agent.state.desired_speed = 1.5
 
     .. note ::
 
-        You need to be aware that currently there are no checks done when setting
-        properties on an Agent instance. For example it is possible to set an Agent position
-        outside the walkable area of the Simulation resulting in a crash.
+        You need to be aware that currently there are no checks done when
+        setting properties on an Agent instance. For example it is possible to
+        set an Agent position outside the walkable area of the Simulation
+        resulting in a crash.
     """
 
-    def __init__(self, backing) -> None:
+    def __init__(self, simulation: Simulation, agent_id: int) -> None:
         """Do not use.
 
-        Retrieve agents from the simulation.
+        Retrieve agent handles from the simulation.
         """
-        self._obj = backing
+        self.__simulation = simulation
+        self.__id = agent_id
+
+    def __resolve(self):
+        # Transient reference: only valid for the duration of one property
+        # call, never stored.
+        return self.__simulation._obj.agent(self.__id)
 
     @property
     def id(self) -> int:
         """Numeric id of the agent in this simulation."""
-        return self._obj.id
+        return self.__resolve().id
 
     @property
     def journey_id(self) -> int:
         """Id of the :class:`~jupedsim.journey.JourneyDescription` the agent is currently following."""
-        return self._obj.journey_id
+        return self.__resolve().journey_id
 
     @property
     def stage_id(self) -> int:
         """Id of the :class:`Stage` the Agent is currently targeting."""
-        return self._obj.stage_id
+        return self.__resolve().stage_id
 
     @property
     def position(self) -> tuple[float, float]:
         """Position of the agent."""
-        return self._obj.position
+        return self.__resolve().position
 
     @property
-    def orientation(self) -> tuple[float, float]:
-        """Orientation of the agent."""
-        return self._obj.orientation
+    def location(self) -> Location:
+        """Place the agent stands at, as a
+        :class:`~jupedsim.location.Location`.
+
+        The same position :attr:`position` reports, plus the height of the
+        floor it is on -- and in a form that can be handed back to the
+        simulation, e.g. as another agent's
+        :attr:`final_target`.
+        """
+        return Location(self.__resolve().location)
 
     @property
-    def target(self) -> tuple[float, float]:
-        """Current target of the agent.
+    def final_target(self) -> tuple[float, float]:
+        """Current final target of the agent.
 
         Can be used to directly steer an agent towards the given coordinate.
-        This will bypass the strategical and tactical level, but the operational level
-        will still be active.
+        This will bypass the strategical and tactical level, but the
+        operational level will still be active.
 
         .. important::
 
-            If the agent is not in a Journey with a DirectSteering stage, any change will be
-            ignored.
+            If the agent is not in a Journey with a DirectSteering stage, any
+            change will be ignored.
 
         .. important::
 
-            When setting the target, the given coordinates must lie within the walkable area.
-            Otherwise, an error will be thrown at the next iteration call.
+            When setting the target, the given coordinates must lie within the
+            walkable area. Otherwise, an error will be thrown immediately.
+
+        Accepts a :class:`~jupedsim.location.Location` as well as an
+        ``(x, y)`` tuple. Over stacked floors only the location says which
+        floor is meant; the tuple is located around the agent's own height.
 
         Returns:
-            Current target of the agent.
+            Current final target of the agent, as ``(x, y)``.
         """
-        return self._obj.target
+        return self.__resolve().final_target
 
-    @target.setter
-    def target(self, target: tuple[float, float]):
-        self._obj.target = target
+    @final_target.setter
+    def final_target(
+        self, final_target: Location | tuple[float, float]
+    ) -> None:
+        target = (
+            final_target._obj
+            if isinstance(final_target, Location)
+            else final_target
+        )
+        self.__simulation._obj.set_agent_target(self.__id, target)
 
     @property
-    def model(
-        self,
-    ) -> (
-        GeneralizedCentrifugalForceModelState
-        | CollisionFreeSpeedModelState
-        | CollisionFreeSpeedModelV2State
-        | AnticipationVelocityModelState
-        | SocialForceModelState
-    ):
-        """Access model specific state of this agent."""
-        model = self._obj.model
-        if isinstance(model, py_jps.GeneralizedCentrifugalForceModelState):
-            return GeneralizedCentrifugalForceModelState(model)
-        elif isinstance(model, py_jps.CollisionFreeSpeedModelState):
-            return CollisionFreeSpeedModelState(model)
-        elif isinstance(model, py_jps.CollisionFreeSpeedModelV2State):
-            return CollisionFreeSpeedModelV2State(model)
-        elif isinstance(model, py_jps.AnticipationVelocityModelState):
-            return AnticipationVelocityModelState(model)
-        elif isinstance(model, py_jps.SocialForceModelState):
-            return SocialForceModelState(model)
-        else:
-            raise Exception("Internal error")
+    def next_target(self) -> tuple[float, float]:
+        """Current next target of the agent.
+
+        Next destination is the next waypoint of the current stage of the agent's journey.
+        It is used by the operational model to compute the next state of the agent.
+
+        Returns:
+            Current next destination of the agent.
+        """
+        return self.__resolve().next_destination
+
+    @property
+    def state(self) -> Any:
+        """Access model specific state of this agent.
+
+        For built-in models this returns a state handle that resolves the
+        agent on every attribute access, e.g.
+        ``agent.state.desired_speed = 1.5``. For custom Python models this
+        returns the user supplied state object.
+        """
+        raw_state = self.__resolve().state
+        if isinstance(raw_state, py_jps._CustomModelState):
+            return raw_state.model
+        return _ModelStateHandle(self.__simulation, self.__id)
+
+    def __repr__(self) -> str:
+        return f"Agent(id={self.__id})"

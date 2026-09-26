@@ -3,8 +3,6 @@
 
 #include "RoutingEngine.hpp"
 
-#include <vector>
-
 class TacticalDecisionSystem
 {
 public:
@@ -18,8 +16,7 @@ public:
     void Run(RoutingEngine& routingEngine, auto&& agents) const
     {
         for(auto& agent : agents) {
-            const auto dest = agent.target;
-            agent.destination = routingEngine.ComputeWaypoint(agent.pos, dest);
+            agent.nextTarget = routingEngine.ComputeWaypoint(agent.location, agent.finalTarget);
         }
     }
 };

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "GeometricFunctions.hpp"
-
 #include "Point.hpp"
 #include "Polygon.hpp"
+#include "TestCommon.hpp"
 
 #include <gtest/gtest.h>
 

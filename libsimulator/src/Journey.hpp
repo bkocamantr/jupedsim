@@ -2,16 +2,19 @@
 #pragma once
 
 #include "GenericAgent.hpp"
-#include "NeighborhoodSearch.hpp"
 #include "Point.hpp"
-#include "RoutingEngine.hpp"
+#include "SimulationError.hpp"
 #include "Stage.hpp"
-#include "StageDescription.hpp"
 #include "UniqueID.hpp"
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <tuple>
+#include <utility>
+#include <variant>
 #include <vector>
 
 class NonTransitionDescription
@@ -178,7 +181,7 @@ public:
 
     ID Id() const { return id; }
 
-    std::tuple<Point, BaseStage::ID> Target(const GenericAgent& agent) const
+    std::tuple<Location, BaseStage::ID> Target(const GenericAgent& agent) const
     {
         auto& node = stages.at(agent.stageId);
         auto stage = node.stage;

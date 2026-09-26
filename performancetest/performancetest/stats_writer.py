@@ -33,8 +33,9 @@ class StatsWriter(jps.TrajectoryWriter):
         self._trajectory_writer.write_iteration_state(simulation)
         self.write_stats(simulation)
 
-    def end_writing(self, simulation) -> None:
-        self._trajectory_writer.end_writing(simulation)
+    def close(self) -> None:
+        """Flush buffered frames and stats. Nothing is on disk without this."""
+        self._trajectory_writer.close()
 
     def every_nth_frame(self) -> int:
         return self._trajectory_writer.every_nth_frame()
@@ -75,14 +76,14 @@ class StatsWriter(jps.TrajectoryWriter):
         if iteration % self.every_nth_frame() != 0:
             return
         frame_idx = iteration / self.every_nth_frame()
-        stats = simulation.get_last_trace()
+        timer = simulation.timer
         agent_count = simulation.agent_count()
         self._con.cursor().execute(
             "INSERT INTO perf_statistics VALUES(?,?,?,?)",
             (
                 frame_idx,
-                stats.iteration_duration,
-                stats.operational_level_duration,
+                timer.iteration_duration_us,
+                timer.operational_level_duration_us,
                 agent_count,
             ),
         )

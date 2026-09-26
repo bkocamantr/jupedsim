@@ -1,145 +1,61 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
-#include "conversion.hpp"
-#include "wrapper.hpp"
+#include "CollisionFreeSpeedModelV2.hpp"
+#include "OperationalModel.hpp"
+#include "type_casters.hpp" // IWYU pragma: keep
 
-#include <jupedsim/jupedsim.h>
-
-#include <fmt/format.h>
-#include <fmt/ranges.h>
+#include <pybind11/cast.h>
 #include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
+#include <pybind11/stl.h> // IWYU pragma: keep
 
 namespace py = pybind11;
 
 void init_collision_free_speed_model_v2(py::module_& m)
 {
-    py::class_<JPS_CollisionFreeSpeedModelV2AgentParameters>(
-        m, "CollisionFreeSpeedModelV2AgentParameters")
+    py::class_<CollisionFreeSpeedModelV2, OperationalModel, py::smart_holder>(
+        m, "CollisionFreeSpeedModelV2")
+        .def(py::init<>());
+    const CollisionFreeSpeedModelV2::State d{};
+    py::class_<CollisionFreeSpeedModelV2::State>(m, "CollisionFreeSpeedModelV2State")
         .def(
-            py::init([](std::tuple<double, double> position,
-                        double time_gap,
-                        double desired_speed,
-                        double radius,
-                        JPS_JourneyId journey_id,
-                        JPS_StageId stage_id,
+            py::init([](Point orientation,
                         double strengthNeighborRepulsion,
                         double rangeNeighborRepulsion,
                         double strengthGeometryRepulsion,
-                        double rangeGeometryRepulsion) {
-                return JPS_CollisionFreeSpeedModelV2AgentParameters{
-                    intoJPS_Point(position),
-                    journey_id,
-                    stage_id,
-                    time_gap,
-                    desired_speed,
-                    radius,
-                    strengthNeighborRepulsion,
-                    rangeNeighborRepulsion,
-                    strengthGeometryRepulsion,
-                    rangeGeometryRepulsion};
+                        double rangeGeometryRepulsion,
+                        double timeGap,
+                        double desiredSpeed,
+                        double radius) {
+                return CollisionFreeSpeedModelV2::State{
+                    .orientation = orientation,
+                    .strengthNeighborRepulsion = strengthNeighborRepulsion,
+                    .rangeNeighborRepulsion = rangeNeighborRepulsion,
+                    .strengthGeometryRepulsion = strengthGeometryRepulsion,
+                    .rangeGeometryRepulsion = rangeGeometryRepulsion,
+                    .timeGap = timeGap,
+                    .v0 = desiredSpeed,
+                    .radius = radius};
             }),
             py::kw_only(),
-            py::arg("position"),
-            py::arg("time_gap"),
-            py::arg("desired_speed"),
-            py::arg("radius"),
-            py::arg("journey_id"),
-            py::arg("stage_id"),
-            py::arg("strength_neighbor_repulsion"),
-            py::arg("range_neighbor_repulsion"),
-            py::arg("strength_geometry_repulsion"),
-            py::arg("range_geometry_repulsion"))
-        .def("__repr__", [](const JPS_CollisionFreeSpeedModelV2AgentParameters& p) {
-            return fmt::format(
-                "position: {}, journey_id: {}, stage_id: {}, "
-                "time_gap: {}, desired_speed: {}, radius: {}",
-                "strength_neighbor_repulsion: {}, range_neighbor_repulsion: {}"
-                "strength_geometry_repulsion: {}, range_geometry_repulsion: {}",
-                intoTuple(p.position),
-                p.journeyId,
-                p.stageId,
-                p.time_gap,
-                p.v0,
-                p.radius,
-                p.strengthNeighborRepulsion,
-                p.rangeNeighborRepulsion,
-                p.strengthGeometryRepulsion,
-                p.rangeGeometryRepulsion);
-        });
-    py::class_<JPS_CollisionFreeSpeedModelV2Builder_Wrapper>(m, "CollisionFreeSpeedModelV2Builder")
-        .def(py::init([]() {
-            return std::make_unique<JPS_CollisionFreeSpeedModelV2Builder_Wrapper>(
-                JPS_CollisionFreeSpeedModelV2Builder_Create());
-        }))
-        .def("build", [](JPS_CollisionFreeSpeedModelV2Builder_Wrapper& w) {
-            JPS_ErrorMessage errorMsg{};
-            auto result = JPS_CollisionFreeSpeedModelV2Builder_Build(w.handle, &errorMsg);
-            if(result) {
-                return std::make_unique<JPS_OperationalModel_Wrapper>(result);
-            }
-            auto msg = std::string(JPS_ErrorMessage_GetMessage(errorMsg));
-            JPS_ErrorMessage_Free(errorMsg);
-            throw std::runtime_error{msg};
-        });
-    py::class_<JPS_CollisionFreeSpeedModelV2State_Wrapper>(m, "CollisionFreeSpeedModelV2State")
-        .def_property(
-            "time_gap",
-            [](const JPS_CollisionFreeSpeedModelV2State_Wrapper& w) {
-                return JPS_CollisionFreeSpeedModelV2State_GetTimeGap(w.handle);
-            },
-            [](JPS_CollisionFreeSpeedModelV2State_Wrapper& w, double time_gap) {
-                JPS_CollisionFreeSpeedModelV2State_SetTimeGap(w.handle, time_gap);
-            })
-        .def_property(
-            "desired_speed",
-            [](const JPS_CollisionFreeSpeedModelV2State_Wrapper& w) {
-                return JPS_CollisionFreeSpeedModelV2State_GetV0(w.handle);
-            },
-            [](JPS_CollisionFreeSpeedModelV2State_Wrapper& w, double desiredSpeed) {
-                JPS_CollisionFreeSpeedModelV2State_SetV0(w.handle, desiredSpeed);
-            })
-        .def_property(
-            "radius",
-            [](const JPS_CollisionFreeSpeedModelV2State_Wrapper& w) {
-                return JPS_CollisionFreeSpeedModelV2State_GetRadius(w.handle);
-            },
-            [](JPS_CollisionFreeSpeedModelV2State_Wrapper& w, double radius) {
-                JPS_CollisionFreeSpeedModelV2State_SetRadius(w.handle, radius);
-            })
-        .def_property(
+            py::arg("orientation") = d.orientation,
+            py::arg("strength_neighbor_repulsion") = d.strengthNeighborRepulsion,
+            py::arg("range_neighbor_repulsion") = d.rangeNeighborRepulsion,
+            py::arg("strength_geometry_repulsion") = d.strengthGeometryRepulsion,
+            py::arg("range_geometry_repulsion") = d.rangeGeometryRepulsion,
+            py::arg("time_gap") = d.timeGap,
+            py::arg("desired_speed") = d.v0,
+            py::arg("radius") = d.radius)
+        .def_readwrite("orientation", &CollisionFreeSpeedModelV2::State::orientation)
+        .def_readwrite(
             "strength_neighbor_repulsion",
-            [](const JPS_CollisionFreeSpeedModelV2State_Wrapper& w) {
-                return JPS_CollisionFreeSpeedModelV2State_GetStrengthNeighborRepulsion(w.handle);
-            },
-            [](JPS_CollisionFreeSpeedModelV2State_Wrapper& w, double strengthNeighborRepulsion) {
-                JPS_CollisionFreeSpeedModelV2State_SetStrengthNeighborRepulsion(
-                    w.handle, strengthNeighborRepulsion);
-            })
-        .def_property(
-            "range_neighbor_repulsion",
-            [](const JPS_CollisionFreeSpeedModelV2State_Wrapper& w) {
-                return JPS_CollisionFreeSpeedModelV2State_GetRangeNeighborRepulsion(w.handle);
-            },
-            [](JPS_CollisionFreeSpeedModelV2State_Wrapper& w, double rangeNeighborRepulsion) {
-                JPS_CollisionFreeSpeedModelV2State_SetRangeNeighborRepulsion(
-                    w.handle, rangeNeighborRepulsion);
-            })
-        .def_property(
+            &CollisionFreeSpeedModelV2::State::strengthNeighborRepulsion)
+        .def_readwrite(
+            "range_neighbor_repulsion", &CollisionFreeSpeedModelV2::State::rangeNeighborRepulsion)
+        .def_readwrite(
             "strength_geometry_repulsion",
-            [](const JPS_CollisionFreeSpeedModelV2State_Wrapper& w) {
-                return JPS_CollisionFreeSpeedModelV2State_GetStrengthGeometryRepulsion(w.handle);
-            },
-            [](JPS_CollisionFreeSpeedModelV2State_Wrapper& w, double strengthGeometryRepulsion) {
-                JPS_CollisionFreeSpeedModelV2State_SetStrengthGeometryRepulsion(
-                    w.handle, strengthGeometryRepulsion);
-            })
-        .def_property(
-            "range_geometry_repulsion",
-            [](const JPS_CollisionFreeSpeedModelV2State_Wrapper& w) {
-                return JPS_CollisionFreeSpeedModelV2State_GetRangeGeometryRepulsion(w.handle);
-            },
-            [](JPS_CollisionFreeSpeedModelV2State_Wrapper& w, double rangeGeometryRepulsion) {
-                JPS_CollisionFreeSpeedModelV2State_SetRangeGeometryRepulsion(
-                    w.handle, rangeGeometryRepulsion);
-            });
+            &CollisionFreeSpeedModelV2::State::strengthGeometryRepulsion)
+        .def_readwrite(
+            "range_geometry_repulsion", &CollisionFreeSpeedModelV2::State::rangeGeometryRepulsion)
+        .def_readwrite("time_gap", &CollisionFreeSpeedModelV2::State::timeGap)
+        .def_readwrite("desired_speed", &CollisionFreeSpeedModelV2::State::v0)
+        .def_readwrite("radius", &CollisionFreeSpeedModelV2::State::radius);
 }

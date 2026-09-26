@@ -1,25 +1,32 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #pragma once
 
-#include "CollisionGeometry.hpp"
+#include "EnvironmentQuery.hpp"
 #include "GenericAgent.hpp"
 #include "GeometricFunctions.hpp"
-#include "Logger.hpp"
+#include "Geometry/Location.hpp"
+#include "LineSegment.hpp"
 #include "NeighborhoodSearch.hpp"
 #include "Point.hpp"
 #include "Polygon.hpp"
 #include "UniqueID.hpp"
 #include "Util.hpp"
 
+#include <fmt/core.h>
+
 #include <algorithm>
+#include <cassert>
+#include <cstddef>
 #include <iterator>
 #include <limits>
+#include <set>
 #include <unordered_set>
+#include <variant>
 #include <vector>
 
-class Simulation;
-
 class BaseStage;
+class Geometry;
+class Simulation;
 
 enum class WaitingSetState {
     Active,
@@ -106,7 +113,7 @@ protected:
 public:
     virtual ~BaseStage() = default;
     virtual bool IsCompleted(const GenericAgent& agent) = 0;
-    virtual Point Target(const GenericAgent& agent) = 0;
+    virtual Location Target(const GenericAgent& agent) = 0;
     virtual StageProxy Proxy(Simulation* simulation_) = 0;
     ID Id() const { return id; }
     size_t CountTargeting() const { return targeting; }
@@ -132,185 +139,72 @@ struct fmt::formatter<BaseStage> {
 
 class Waypoint : public BaseStage
 {
-    Point position;
+    Location position;
     double distance;
 
 public:
-    Waypoint(Point position_, double distance_);
+    Waypoint(Location position_, double distance_);
     ~Waypoint() override = default;
     bool IsCompleted(const GenericAgent& agent) override;
-    Point Target(const GenericAgent& agent) override;
+    Location Target(const GenericAgent& agent) override;
     StageProxy Proxy(Simulation* simulation_) override;
-    Point Position() const { return position; };
+    Point Position() const { return position.xy(); };
 };
 
 /// Notifies simulation of all agents that need to be removed at the beginning of the next iteration
 class Exit : public BaseStage
 {
     Polygon area;
+    Location centroid;
     std::vector<GenericAgent::ID>& toRemove;
 
 public:
-    Exit(Polygon area, std::vector<GenericAgent::ID>& toRemove_);
+    Exit(Polygon area, Location centroid_, std::vector<GenericAgent::ID>& toRemove_);
     ~Exit() override = default;
     bool IsCompleted(const GenericAgent& agent) override;
-    Point Target(const GenericAgent& agent) override;
+    Location Target(const GenericAgent& agent) override;
     StageProxy Proxy(Simulation* simulation_) override;
     Polygon Position() const { return area; };
 };
 
 class NotifiableWaitingSet : public BaseStage
 {
-    std::vector<Point> slots;
+    std::vector<Location> slots;
     std::vector<GenericAgent::ID> occupants{};
     WaitingSetState state{WaitingSetState::Active};
 
 public:
-    NotifiableWaitingSet(std::vector<Point> slots_);
+    NotifiableWaitingSet(std::vector<Location> slots_);
     ~NotifiableWaitingSet() override = default;
     bool IsCompleted(const GenericAgent& agent) override;
-    Point Target(const GenericAgent& agent) override;
+    Location Target(const GenericAgent& agent) override;
     StageProxy Proxy(Simulation* simulation_) override;
     void State(WaitingSetState s);
     WaitingSetState State() const;
-    template <typename T>
-    void Update(const NeighborhoodSearch<T>& neighborhoodSearch, const CollisionGeometry& geometry);
+    void Update(const EnvironmentQuery& envQuery);
     const std::vector<GenericAgent::ID>& Occupants() const;
-    const std::vector<Point>& Slots() const { return slots; };
+    const std::vector<Location>& Slots() const { return slots; };
 };
-
-template <typename T>
-void NotifiableWaitingSet::Update(
-    const NeighborhoodSearch<T>& neighborhoodSearch,
-    const CollisionGeometry& geometry)
-{
-    if(state == WaitingSetState::Inactive) {
-        return;
-    }
-    const auto count_occupants = occupants.size();
-    if(count_occupants == slots.size()) {
-        return;
-    }
-
-    for(size_t index = count_occupants; index < slots.size(); ++index) {
-        const auto slot_pos = slots[index];
-        const auto& boundary = geometry.LineSegmentsInApproxDistanceTo(slot_pos);
-        auto candidates = neighborhoodSearch.GetNeighboringAgents(slot_pos, 2);
-        candidates.erase(
-            std::remove_if(
-                std::begin(candidates),
-                std::end(candidates),
-                [&slot_pos, &boundary](const auto& neighbor) {
-                    const auto agent_to_neighbor = LineSegment(slot_pos, neighbor.pos);
-                    if(std::find_if(
-                           boundary.cbegin(),
-                           boundary.cend(),
-                           [&agent_to_neighbor](const auto& boundary_segment) {
-                               return intersects(agent_to_neighbor, boundary_segment);
-                           }) != boundary.end()) {
-                        return true;
-                    }
-
-                    return false;
-                }),
-            std::end(candidates));
-
-        GenericAgent::ID occupant = GenericAgent::ID::Invalid;
-        double min_distance = std::numeric_limits<double>::max();
-        for(const auto& agent : candidates) {
-            if(agent.stageId == id) {
-                if(std::find(std::begin(occupants), std::end(occupants), agent.id) ==
-                   std::end(occupants)) {
-                    const auto distance = (agent.pos - slots[index]).Norm();
-                    if(distance < min_distance) {
-                        min_distance = distance;
-                        occupant = agent.id;
-                    }
-                }
-            }
-        }
-        if(occupant != GenericAgent::ID::Invalid) {
-            occupants.push_back(occupant);
-        } else {
-            return;
-        }
-    }
-}
 
 class NotifiableQueue : public BaseStage
 {
 
 private:
-    std::vector<Point> slots;
+    std::vector<Location> slots;
     std::vector<GenericAgent::ID> occupants{};
     std::set<GenericAgent::ID> exitingThisUpdate{};
 
 public:
-    NotifiableQueue(std::vector<Point> slots_);
+    NotifiableQueue(std::vector<Location> slots_);
     ~NotifiableQueue() override = default;
     bool IsCompleted(const GenericAgent& agent) override;
-    Point Target(const GenericAgent& agent) override;
+    Location Target(const GenericAgent& agent) override;
     StageProxy Proxy(Simulation* simulation_) override;
-    template <typename T>
-    void Update(const NeighborhoodSearch<T>& neighborhoodSearch, const CollisionGeometry& geometry);
+    void Update(const EnvironmentQuery& envQuery);
     void Pop(size_t count);
     const std::vector<GenericAgent::ID>& Occupants() const;
-    const std::vector<Point>& Slots() const { return slots; };
+    const std::vector<Location>& Slots() const { return slots; };
 };
-
-template <typename T>
-void NotifiableQueue::Update(
-    const NeighborhoodSearch<T>& neighborhoodSearch,
-    const CollisionGeometry& geometry)
-{
-    const auto count_occupants = occupants.size();
-    if(count_occupants == slots.size()) {
-        return;
-    }
-
-    for(size_t index = count_occupants; index < slots.size(); ++index) {
-        const auto slot_pos = slots[index];
-        const auto& boundary = geometry.LineSegmentsInApproxDistanceTo(slot_pos);
-        auto candidates = neighborhoodSearch.GetNeighboringAgents(slot_pos, 2);
-        candidates.erase(
-            std::remove_if(
-                std::begin(candidates),
-                std::end(candidates),
-                [&slot_pos, &boundary](const auto& neighbor) {
-                    const auto agent_to_neighbor = LineSegment(slot_pos, neighbor.pos);
-                    if(std::find_if(
-                           boundary.cbegin(),
-                           boundary.cend(),
-                           [&agent_to_neighbor](const auto& boundary_segment) {
-                               return intersects(agent_to_neighbor, boundary_segment);
-                           }) != boundary.end()) {
-                        return true;
-                    }
-
-                    return false;
-                }),
-            std::end(candidates));
-
-        GenericAgent::ID occupant = GenericAgent::ID::Invalid;
-        double min_distance = std::numeric_limits<double>::max();
-        for(const auto& agent : candidates) {
-            if(agent.stageId != id || Contains(occupants, agent.id) ||
-               exitingThisUpdate.contains(agent.id)) {
-                continue;
-            }
-            const auto distance = (agent.pos - slots[index]).Norm();
-            if(distance < min_distance) {
-                min_distance = distance;
-                occupant = agent.id;
-            }
-        }
-        if(occupant != GenericAgent::ID::Invalid) {
-            occupants.emplace_back(occupant);
-        } else {
-            return;
-        }
-    }
-}
 
 class DirectSteering : public BaseStage
 {
@@ -318,7 +212,7 @@ public:
     DirectSteering() = default;
     ~DirectSteering() override = default;
     bool IsCompleted(const GenericAgent&) override { return false; };
-    Point Target(const GenericAgent& agent) override { return agent.target; };
+    Location Target(const GenericAgent& agent) override;
     StageProxy Proxy(Simulation* simulation) override
     {
         return DirectSteeringProxy(simulation, this);

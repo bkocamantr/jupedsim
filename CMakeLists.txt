@@ -2,11 +2,11 @@
 # Project setup
 ################################################################################
 cmake_minimum_required(VERSION 3.22 FATAL_ERROR)
-project(JuPedSim VERSION 1.3.0 LANGUAGES CXX)
+project(JuPedSim VERSION 2.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-set(CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake_modules")
+set(CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake_modules")
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -22,10 +22,9 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
       STRING "Choose the type of build." FORCE)
 endif()
 
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-set(USE_IPO ON)
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/lib)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/lib)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin)
 
 check_prefix_path()
 
@@ -38,19 +37,25 @@ print_var(WERROR)
 set(BUILD_TESTS OFF CACHE BOOL "Build tests")
 print_var(BUILD_TESTS)
 
-set(BUILD_WITH_ASAN OFF CACHE BOOL
-  "Build with address sanitizer support. Linux / macOS only.")
-print_var(BUILD_WITH_ASAN)
-if(BUILD_WITH_ASAN AND ${CMAKE_SYSTEM} MATCHES "Windows")
-    message(FATAL_ERROR "Address sanitizer builds are not supported on Windows")
+set(BUILD_WITH_SANITIZERS OFF CACHE BOOL
+  "Build with address and undefined-behavior sanitizers. Linux / macOS only.")
+print_var(BUILD_WITH_SANITIZERS)
+if(BUILD_WITH_SANITIZERS AND WIN32)
+    message(FATAL_ERROR "Sanitizer builds are not supported on Windows")
 endif()
 
 set(BUILD_BENCHMARKS OFF CACHE BOOL "Build micro benchmark")
 print_var(BUILD_BENCHMARKS)
 
+set(BUILD_TOOLS OFF CACHE BOOL "Build CLI tools")
+print_var(BUILD_TOOLS)
+
+set(USE_IPO ON CACHE BOOL "Build with interprocedural optimization (LTO) where supported")
+print_var(USE_IPO)
+
 set(WITH_FORMAT OFF CACHE BOOL "Create format tools")
 print_var(WITH_FORMAT)
-if(WITH_FORMAT AND ${CMAKE_SYSTEM} MATCHES "Windows")
+if(WITH_FORMAT AND WIN32)
     message(FATAL_ERROR "Format target not supported on Windows")
 endif()
 
@@ -65,7 +70,8 @@ endif()
 # WARNING: Do not break the lines, each option has to be on its own line or
 #          CMake will enclose multiple flags in '' which the compiler then
 #          treats as a single flag and does not understand.
-list(APPEND COMMON_COMPILE_OPTIONS
+add_library(project_options INTERFACE)
+target_compile_options(project_options INTERFACE
     $<$<AND:$<OR:$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>,$<CXX_COMPILER_ID:GNU>>,$<BOOL:${WERROR}>>:-Werror>
     $<$<OR:$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>,$<CXX_COMPILER_ID:GNU>>:-Wall>
     $<$<OR:$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>,$<CXX_COMPILER_ID:GNU>>:-Wextra>
@@ -75,9 +81,10 @@ list(APPEND COMMON_COMPILE_OPTIONS
     $<$<CXX_COMPILER_ID:MSVC>:/W2>
     $<$<CXX_COMPILER_ID:MSVC>:/EHsc>
     $<$<CXX_COMPILER_ID:MSVC>:/MP>
-    $<$<AND:$<OR:$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>>,$<BOOL:${BUILD_WITH_ASAN}>>:-fno-optimize-sibling-calls>
-    $<$<AND:$<OR:$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>>,$<BOOL:${BUILD_WITH_ASAN}>>:-fsanitize=address>
-    $<$<AND:$<OR:$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>>,$<BOOL:${BUILD_WITH_ASAN}>>:-shared-libasan>
+    $<$<AND:$<OR:$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>,$<CXX_COMPILER_ID:GNU>>,$<BOOL:${BUILD_WITH_SANITIZERS}>>:-fsanitize=address,undefined>
+    $<$<AND:$<OR:$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>,$<CXX_COMPILER_ID:GNU>>,$<BOOL:${BUILD_WITH_SANITIZERS}>>:-fno-optimize-sibling-calls>
+    $<$<AND:$<OR:$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>,$<CXX_COMPILER_ID:GNU>>,$<BOOL:${BUILD_WITH_SANITIZERS}>>:-fno-sanitize-recover=all>
+    $<$<AND:$<OR:$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>>,$<BOOL:${BUILD_WITH_SANITIZERS}>>:-shared-libasan>
 )
 
 ################################################################################
@@ -86,24 +93,41 @@ list(APPEND COMMON_COMPILE_OPTIONS
 add_subdirectory(third-party)
 
 ################################################################################
+# Interprocedural optimization
+################################################################################
+# Note: Placed after add_subdirectory(third-party) so that these variables
+# do not put the vendored dependencies under LTO as well.
+if(USE_IPO)
+    include(CheckIPOSupported)
+    # LANGUAGES CXX is required: vendored dependencies enable C, and checking
+    # every enabled language would report IPO as unsupported for this project.
+    check_ipo_supported(RESULT IPO_SUPPORTED OUTPUT IPO_NOT_SUPPORTED_REASON LANGUAGES CXX)
+    if(NOT IPO_SUPPORTED)
+        message(STATUS "IPO unavailable: ${IPO_NOT_SUPPORTED_REASON}")
+    endif()
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ${IPO_SUPPORTED})
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_DEBUG OFF)
+endif()
+
+################################################################################
 # VCS info
 ################################################################################
 find_package(Git QUIET)
 find_program(GIT_SCM git DOC "Git version control")
 mark_as_advanced(GIT_SCM)
-find_file(GITDIR NAMES .git PATHS ${CMAKE_SOURCE_DIR} NO_DEFAULT_PATH)
+find_file(GITDIR NAMES .git PATHS ${PROJECT_SOURCE_DIR} NO_DEFAULT_PATH)
 if (GIT_SCM AND GITDIR)
     # the commit's SHA1, and whether the building workspace was dirty or not
     # describe --match=NeVeRmAtCh --always --tags --abbrev=40 --dirty
     execute_process(COMMAND
         "${GIT_EXECUTABLE}" --no-pager describe --match=Nevermatch --tags --always --dirty
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
     OUTPUT_VARIABLE GIT_SHA1
     ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
     # branch
     execute_process(
     COMMAND "${GIT_EXECUTABLE}" rev-parse --abbrev-ref HEAD
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
     OUTPUT_VARIABLE GIT_BRANCH
     OUTPUT_STRIP_TRAILING_WHITESPACE
     )
@@ -111,20 +135,20 @@ if (GIT_SCM AND GITDIR)
     # the date of the commit
     execute_process(COMMAND
     "${GIT_EXECUTABLE}" log -1 --format=%ad --date=local
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
     OUTPUT_VARIABLE GIT_DATE
     ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
 
   execute_process(COMMAND
     "${GIT_EXECUTABLE}" describe --tags --abbrev=0
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
     OUTPUT_VARIABLE GIT_TAG
     ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
 
     # the subject of the commit
     execute_process(COMMAND
     "${GIT_EXECUTABLE}" log -1 --format=%s
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
     OUTPUT_VARIABLE GIT_COMMIT_SUBJECT
     ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
     # remove # from subject
@@ -148,13 +172,13 @@ target_compile_definitions(git-info INTERFACE
     GIT_COMMIT_SUBJECT="${GIT_COMMIT_SUBJECT}"
     GIT_BRANCH="${GIT_BRANCH}"
 )
-configure_file(cmake_templates/BuildInfo.hpp.in ${CMAKE_BINARY_DIR}/generated/build_info/BuildInfo.hpp @ONLY)
+configure_file(cmake_templates/BuildInfo.hpp.in ${PROJECT_BINARY_DIR}/generated/build_info/BuildInfo.hpp @ONLY)
 add_library(build_info INTERFACE)
 target_include_directories(build_info INTERFACE
-    ${CMAKE_BINARY_DIR}/generated/build_info
+    ${PROJECT_BINARY_DIR}/generated/build_info
 )
 if(UNIX)
-    configure_file(cmake_templates/unix_env.in ${CMAKE_BINARY_DIR}/environment @ONLY)
+    configure_file(cmake_templates/unix_env.in ${PROJECT_BINARY_DIR}/environment @ONLY)
 endif()
 
 ################################################################################
@@ -162,11 +186,11 @@ endif()
 ################################################################################
 if(BUILD_TESTS)
     if(UNIX)
-        set(pytest-wrapper-in ${CMAKE_SOURCE_DIR}/cmake_templates/run-systemtests.unix.in)
-        set(pytest-wrapper-out ${CMAKE_BINARY_DIR}/run-systemtests)
+        set(pytest-wrapper-in ${PROJECT_SOURCE_DIR}/cmake_templates/run-pythontests.unix.in)
+        set(pytest-wrapper-out ${PROJECT_BINARY_DIR}/run-pythontests)
     else()
-        set(pytest-wrapper-in ${CMAKE_SOURCE_DIR}/cmake_templates/run-systemtests.windows.in)
-        set(pytest-wrapper-out ${CMAKE_BINARY_DIR}/run-systemtests.cmd)
+        set(pytest-wrapper-in ${PROJECT_SOURCE_DIR}/cmake_templates/run-pythontests.windows.in)
+        set(pytest-wrapper-out ${PROJECT_BINARY_DIR}/run-pythontests.cmd)
     endif()
     configure_file(
         ${pytest-wrapper-in}
@@ -174,25 +198,19 @@ if(BUILD_TESTS)
         @ONLY
     )
     add_custom_target(tests
-        DEPENDS systemtests unittests
+        DEPENDS pythontests unittests
     )
-    add_custom_target(systemtests
+    add_custom_target(pythontests
         COMMENT "Running system tests"
         COMMAND ${pytest-wrapper-out} -vv -s
-                --basetemp=${CMAKE_BINARY_DIR}/systemtest-out
-                --junit-xml=result-systemtests.xml
+                --basetemp=${PROJECT_BINARY_DIR}/systemtest-out
+                --junit-xml=result-pythontests.xml
         DEPENDS py_jupedsim
+        USES_TERMINAL
     )
-    set(unittests_dependency_list libjupedsim-unittests libsimulator-unittests)
+    set(unittests_dependency_list libsimulator-unittests libfloorfield-unittests)
     add_custom_target(unittests
         DEPENDS ${unittests_dependency_list}
-    )
-
-    add_custom_target(libjupedsim-unittests
-        COMMENT "Running libjupedsim unittests"
-        COMMAND $<TARGET_FILE:libjupedsim-tests>
-                --gtest_output=xml:result-libjupedsim-unittests.xml
-        DEPENDS libjupedsim-tests
     )
     add_custom_target(libsimulator-unittests
         COMMENT "Running unit tests"
@@ -200,11 +218,23 @@ if(BUILD_TESTS)
                 --gtest_output=xml:result-libsimulator-unittests.xml
         DEPENDS libsimulator-tests
     )
+    # Note: we explicitly set RUSTC here to be the same rustc that corrosion found.
+    # For some unknown reason cargo picks up the rustc in the ubuntu-latest image and
+    # not the one we installed with rustup. Corrosion finds both without issue.
+    add_custom_target(libfloorfield-unittests
+        COMMENT "Running libfloorfield tests (Rust)"
+        COMMAND ${CMAKE_COMMAND} -E env RUSTC=$<TARGET_FILE:Rust::Rustc>
+                $<TARGET_FILE:Rust::Cargo> test
+                --manifest-path ${CMAKE_CURRENT_SOURCE_DIR}/libfloorfield/Cargo.toml
+                --target-dir ${CMAKE_BINARY_DIR}/cargo/floorfield-tests
+                --locked
+        USES_TERMINAL
+    )
 endif()
 
 if(UNIX)
-    set(performancetests-wrapper-in ${CMAKE_SOURCE_DIR}/cmake_templates/run-performancetests.unix.in)
-    set(performancetests-wrapper-out ${CMAKE_BINARY_DIR}/run-performancetests)
+    set(performancetests-wrapper-in ${PROJECT_SOURCE_DIR}/cmake_templates/run-performancetests.unix.in)
+    set(performancetests-wrapper-out ${PROJECT_BINARY_DIR}/run-performancetests)
     configure_file(
         ${performancetests-wrapper-in}
         ${performancetests-wrapper-out}
@@ -215,22 +245,33 @@ endif()
 ################################################################################
 # Add libraries / executables
 ################################################################################
-add_subdirectory(libjupedsim)
 add_subdirectory(libcommon)
+add_subdirectory(libfloorfield)
 add_subdirectory(libsimulator)
 add_subdirectory(python_bindings_jupedsim)
+if(BUILD_TOOLS)
+    add_subdirectory(tools)
+endif()
 
 ################################################################################
 # Code formatting
 ################################################################################
 if(UNIX AND WITH_FORMAT)
-    set(clang-format-version 19)
-    find_program(CLANG_FORMAT
-        NAMES
-            clang-format-${clang-format-version}
-            clang-format
-        REQUIRED
-    )
+    set(clang-format-version 21)
+    if(DEFINED ENV{CLANG_FORMAT})
+        set(CLANG_FORMAT "$ENV{CLANG_FORMAT}")
+        if(NOT EXISTS "${CLANG_FORMAT}")
+            message(FATAL_ERROR "CLANG_FORMAT environment variable points to non-existent path: ${CLANG_FORMAT}")
+        endif()
+        message(STATUS "Using clang-format from CLANG_FORMAT env: ${CLANG_FORMAT}")
+    else()
+        find_program(CLANG_FORMAT
+            NAMES
+                clang-format-${clang-format-version}
+                clang-format
+            REQUIRED
+        )
+    endif()
     if(CLANG_FORMAT)
         execute_process(
             COMMAND ${CLANG_FORMAT} --version
@@ -247,7 +288,7 @@ if(UNIX AND WITH_FORMAT)
             )
             if(version MATCHES "^${clang-format-version}.*")
                 message(STATUS "Found clang-format ${version}, add format-check and reformat targets")
-                set(folders libcommon libjupedsim libsimulator)
+                set(folders libcommon libsimulator python_bindings_jupedsim tools)
                 add_custom_target(check-format
                     COMMENT "Checking format with clang-format"
                     COMMAND find ${folders}
@@ -256,7 +297,7 @@ if(UNIX AND WITH_FORMAT)
                         -o -name '*.h'
                         -o -name '*.hpp' | xargs ${CLANG_FORMAT}
                         -n -Werror --style=file
-                    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
                 )
                 add_custom_target(reformat
                     COMMENT "Reformatting code with clang-format"
@@ -266,7 +307,7 @@ if(UNIX AND WITH_FORMAT)
                         -o -name '*.h'
                         -o -name '*.hpp' | xargs ${CLANG_FORMAT}
                         -i --style=file
-                    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
                 )
             else ()
                 message(FATAL_ERROR "Could not create formatting target, clang-format version ${version} found, but ${clang-format-version} required")

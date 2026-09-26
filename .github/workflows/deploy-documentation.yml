@@ -1,0 +1,129 @@
+name: Deploy Documentation
+
+on:
+  workflow_run:
+    workflows: ["Build Documentation"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish-docs:
+    name: Publish release documentation
+    if: |
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve release tag
+        id: release
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // GITHUB_REF in a workflow_run always points at the default
+            // branch, so the tag has to be derived from the triggering run.
+            // Tags are immutable, so unlike PR previews there is no
+            // "head moved on" race to guard against here.
+            const run = context.payload.workflow_run;
+            const pattern = /^v[0-9]+\.[0-9]+\.[0-9]+$/;
+
+            const tags = await github.paginate(github.rest.repos.listTags, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+            });
+            const matching = tags
+              .filter(t => t.commit.sha === run.head_sha && pattern.test(t.name))
+              .map(t => t.name);
+
+            if (matching.length !== 1) {
+              core.setFailed(`Expected exactly one release tag at ${run.head_sha}, found: [${matching.join(', ')}]`);
+              return;
+            }
+            const tag = matching[0];
+
+            if (run.head_branch !== tag) {
+              core.setFailed(`Triggering run was for '${run.head_branch}', but the commit is tagged '${tag}'`);
+              return;
+            }
+
+            const { data: release } = await github.rest.repos.getReleaseByTag({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag,
+            });
+            if (release.draft) {
+              core.setFailed(`Release for ${tag} is still a draft`);
+              return;
+            }
+
+            core.info(`Publishing documentation for ${tag}`);
+            core.setOutput('tag', tag);
+
+      - name: Checkout source (for CI scripts)
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          path: jupedsim
+
+      - name: Checkout gh-pages branch
+        uses: actions/checkout@v7
+        with:
+          ref: gh-pages
+          path: gh-pages
+
+      - name: Download documentation artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: documentation
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: ${{ runner.temp }}/html
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install script dependencies
+        run: python3 -m pip install --quiet packaging
+
+      - name: Commit and push documentation
+        working-directory: gh-pages
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Other jobs may push to gh-pages concurrently, so a push can be
+          # rejected as non-fast-forward. On rejection, restart from the
+          # current remote tip and re-stage the release.
+          for attempt in 1 2 3 4 5; do
+            git fetch origin gh-pages
+            git reset --hard origin/gh-pages
+
+            rm -rf "$TAG"
+            mkdir "$TAG"
+            cp -r "$RUNNER_TEMP/html/." "$TAG/"
+
+            if ! python3 "$GITHUB_WORKSPACE/jupedsim/scripts/ci/write_docs_versions.py" .; then
+              echo "::error::Could not update versions.json and stable symlink"
+              exit 1
+            fi
+
+            git add -A "$TAG" stable versions.json
+            git diff --cached --quiet || git commit -m "docs: publish $TAG"
+
+            if git push origin HEAD:gh-pages; then
+              exit 0
+            fi
+            echo "Push rejected (attempt $attempt), retrying"
+            sleep $((attempt * 5))
+          done
+
+          echo "::error::Failed to push documentation after 5 attempts"
+          exit 1

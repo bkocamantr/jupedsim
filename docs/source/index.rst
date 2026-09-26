@@ -7,9 +7,11 @@ JuPedSim
    :hidden:
 
    Getting started <notebooks/getting_started>
+   Migrating to 2.0 <migration_2_0>
    Concepts <concepts/index>
    Pedestrian Models <pedestrian_models/index>
    Notebooks <notebooks/index>
+   Debugging <debugging/index>
    History <history>
    Disclaimer <disclaimer>
    API reference <api/jupedsim/index>

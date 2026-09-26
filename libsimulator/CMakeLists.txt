@@ -1,46 +1,40 @@
 ################################################################################
 # Build libsimulator
 ################################################################################
-add_library(simulator STATIC
+
+
+add_library(simulator STATIC)
+
+target_sources(simulator PRIVATE
     src/AABB.cpp
     src/AABB.hpp
     src/AgentRemovalSystem.hpp
-    src/Clonable.hpp
-    src/CollisionFreeSpeedModel.cpp
-    src/CollisionFreeSpeedModel.hpp
-    src/CollisionFreeSpeedModelBuilder.cpp
-    src/CollisionFreeSpeedModelBuilder.hpp
-    src/CollisionFreeSpeedModelData.hpp
-    src/CollisionFreeSpeedModelUpdate.hpp
-     src/CollisionFreeSpeedModelV2.cpp
-    src/CollisionFreeSpeedModelV2.hpp
-    src/CollisionFreeSpeedModelV2Builder.cpp
-    src/CollisionFreeSpeedModelV2Builder.hpp
-    src/CollisionFreeSpeedModelV2Data.hpp
-    src/CollisionFreeSpeedModelV2Update.hpp
-    src/AnticipationVelocityModel.cpp
-    src/AnticipationVelocityModel.hpp
-    src/AnticipationVelocityModelBuilder.cpp
-    src/AnticipationVelocityModelBuilder.hpp
-    src/AnticipationVelocityModelData.hpp
-    src/AnticipationVelocityModelUpdate.hpp  
-    src/CollisionGeometry.cpp
-    src/CollisionGeometry.hpp
+    src/AgentView.hpp
+    src/CfgCgal.hpp
     src/Ellipse.cpp
     src/Ellipse.hpp
-    src/Enum.hpp
-    src/GeneralizedCentrifugalForceModel.cpp
-    src/GeneralizedCentrifugalForceModel.hpp
-    src/GeneralizedCentrifugalForceModelBuilder.cpp
-    src/GeneralizedCentrifugalForceModelBuilder.hpp
-    src/GeneralizedCentrifugalForceModelData.hpp
-    src/GeneralizedCentrifugalForceModelUpdate.hpp
     src/GenericAgent.hpp
     src/GeometricFunctions.hpp
+    src/Geometry/BoundaryIndex.cpp
+    src/Geometry/BoundaryIndex.hpp
+    src/Geometry/Geometry.cpp
+    src/Geometry/Geometry.hpp
+    src/Geometry/Location.cpp
+    src/Geometry/Location.hpp
+    src/Geometry/ProjectedBoundary.cpp
+    src/Geometry/ProjectedBoundary.hpp
+    src/Geometry/RegionSplit.cpp
+    src/Geometry/RegionSplit.hpp
+    src/Geometry/SegmentGrid.cpp
+    src/Geometry/SegmentGrid.hpp
+    src/Geometry/Validation.cpp
+    src/Geometry/Validation.hpp
+    src/Geometry/WalkableSurface.cpp
+    src/Geometry/WalkableSurface.hpp
     src/GeometryBuilder.cpp
     src/GeometryBuilder.hpp
-    src/GeometrySwitchError.hpp
-    src/Graph.hpp
+    src/HashCombine.hpp
+    src/IteratorPair.hpp
     src/Journey.cpp
     src/Journey.hpp
     src/LineSegment.cpp
@@ -50,29 +44,18 @@ add_library(simulator STATIC
     src/Macros.hpp
     src/Mathematics.cpp
     src/Mathematics.hpp
-    src/Mesh.cpp
-    src/Mesh.hpp
     src/NeighborhoodSearch.hpp
     src/OperationalDecisionSystem.hpp
-    src/OperationalModel.hpp
-    src/OperationalModelUpdate.hpp
     src/Point.cpp
     src/Point.hpp
     src/Polygon.cpp
     src/Polygon.hpp
-    src/RoutingEngine.cpp
     src/RoutingEngine.hpp
     src/Simulation.cpp
     src/Simulation.hpp
     src/SimulationClock.cpp
     src/SimulationClock.hpp
     src/SimulationError.hpp
-    src/SocialForceModel.cpp
-    src/SocialForceModel.hpp
-    src/SocialForceModelBuilder.cpp
-    src/SocialForceModelBuilder.hpp
-    src/SocialForceModelData.hpp
-    src/SocialForceModelUpdate.hpp
     src/Stage.cpp
     src/Stage.hpp
     src/StageDescription.hpp
@@ -81,16 +64,19 @@ add_library(simulator STATIC
     src/StageSystem.cpp
     src/StageSystem.hpp
     src/StrategicalDesicionSystem.hpp
+    src/SurfaceMeshShortestPathRoutingEngine.cpp
+    src/SurfaceMeshShortestPathRoutingEngine.hpp
     src/TacticalDecisionSystem.hpp
-    src/TemplateHelper.hpp
+    src/Timing.cpp
+    src/Timing.hpp
     src/Tracing.cpp
     src/Tracing.hpp
     src/UniqueID.hpp
     src/Util.hpp
 )
-target_compile_options(simulator PRIVATE
-    ${COMMON_COMPILE_OPTIONS}
-)
+
+add_subdirectory(src/OperationalModels)
+target_link_libraries(simulator PRIVATE project_options)
 target_compile_definitions(simulator PUBLIC
     JPSCORE_VERSION="${PROJECT_VERSION}"
 )
@@ -100,48 +86,58 @@ target_link_libraries(simulator PUBLIC
     CGAL::CGAL
     build_info
     glm::glm
+    perfetto
 )
 target_link_options(simulator PUBLIC
-    $<$<AND:$<OR:$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>>,$<BOOL:${BUILD_WITH_ASAN}>>:-fsanitize=address>
+    $<$<AND:$<OR:$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>,$<CXX_COMPILER_ID:GNU>>,$<BOOL:${BUILD_WITH_SANITIZERS}>>:-fsanitize=address,undefined>
+    $<$<AND:$<OR:$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>>,$<BOOL:${BUILD_WITH_SANITIZERS}>>:-shared-libasan>
+    $<$<CXX_COMPILER_ID:GNU>:-Werror=odr>  # error out if LTO finds multiple definitions
 )
 target_include_directories(simulator PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
-set_property(TARGET simulator PROPERTY INTERPROCEDURAL_OPTIMIZATION ${USE_IPO})
-set_property(TARGET simulator PROPERTY INTERPROCEDURAL_OPTIMIZATION_DEBUG OFF)
 
 ################################################################################
 # libsimulator unit tests
 ################################################################################
 if (BUILD_TESTS)
     add_executable(libsimulator-tests
+        test/GeometryFixtures.hpp
         test/TestAABB.cpp
+        test/TestAgentView.cpp
         test/TestBasicPrimitiveTests.cpp
-        test/TestCollisionGeometry.cpp
-        test/TestGraph.cpp
+        test/TestBoundaryIndex.cpp
+        test/TestCommon.hpp
+        test/TestCustomModel.cpp
+        test/TestGenericAgentFormatter.cpp
+        test/TestGeometry.cpp
         test/TestJourney.cpp
         test/TestLineSegment.cpp
-        test/TestMesh.cpp
+        test/TestLocation.cpp
         test/TestNeighborhoodSearch.cpp
+        test/TestOperationalDecisionSystem.cpp
         test/TestPoint.cpp
+        test/TestProjectedBoundary.cpp
+        test/TestRegionSplit.cpp
+        test/TestRoutingEngine.cpp
+        test/TestSegmentGrid.cpp
+        test/TestSimulation.cpp
         test/TestSimulationClock.cpp
         test/TestStage.cpp
         test/TestUniqueID.cpp
+        test/TestValidation.cpp
+        test/TestWalkableSurface.cpp
     )
 
     target_link_libraries(libsimulator-tests PRIVATE
-        GTest::gtest
         GTest::gmock
         GTest::gtest_main
+        GTest::gtest
         simulator
     )
 
-    target_compile_options(libsimulator-tests PRIVATE
-        ${COMMON_COMPILE_OPTIONS}
-    )
+    target_link_libraries(libsimulator-tests PRIVATE project_options)
 
-    set_property(TARGET libsimulator-tests PROPERTY INTERPROCEDURAL_OPTIMIZATION ${USE_IPO})
-    set_property(TARGET libsimulator-tests PROPERTY INTERPROCEDURAL_OPTIMIZATION_DEBUG OFF)
 endif()
 
 ################################################################################
@@ -151,7 +147,7 @@ if (BUILD_BENCHMARKS)
     add_executable(libsimulator-benchmarks
         benchmark/BenchmarkMain.cpp
         benchmark/benchmarkLineSegment.hpp
-        benchmark/benchmarkCollisionGeometry.hpp
+        benchmark/benchmarkWallQuery.hpp
         benchmark/buildGeometries.hpp
     )
 
@@ -160,10 +156,6 @@ if (BUILD_BENCHMARKS)
         simulator
     )
 
-    target_compile_options(libsimulator-benchmarks PRIVATE
-        ${COMMON_COMPILE_OPTIONS}
-    )
+    target_link_libraries(libsimulator-benchmarks PRIVATE project_options)
 
-    set_property(TARGET libsimulator-benchmarks PROPERTY INTERPROCEDURAL_OPTIMIZATION ${USE_IPO})
-    set_property(TARGET libsimulator-benchmarks PROPERTY INTERPROCEDURAL_OPTIMIZATION_DEBUG OFF)
 endif ()

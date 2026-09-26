@@ -9,9 +9,9 @@ import sys
 import time
 
 import jupedsim as jps
+from performancetest.stats_writer import StatsWriter
 
 from performancetest.geometry import geometries
-from performancetest.stats_writer import StatsWriter
 
 positions = [
     (-2009.5709522729476, -176.15789756334283),
@@ -44345,24 +44345,15 @@ class RandomProfilePicker:
         self._mu_d = mu_d
         self._sigma_d = sigma_d
 
-    def randomise_radius_and_v0(
-        self, agent: jps.CollisionFreeSpeedModelAgentParameters
-    ) -> jps.CollisionFreeSpeedModelAgentParameters:
-        new_agent = jps.CollisionFreeSpeedModelAgentParameters()
-        new_agent.position = agent.position
-        new_agent.orientation = agent.orientation
-        new_agent.journey_id = agent.journey_id
-        new_agent.stage_id = agent.stage_id
-        new_agent.time_gap = agent.time_gap
-        new_agent.desired_speed = self._rnd.gauss(
-            mu=self._mu_v0, sigma=self._sigma_v0
+    def random_state(self) -> jps.CollisionFreeSpeedModelState:
+        return jps.CollisionFreeSpeedModelState(
+            orientation=(1.0, 0.0),
+            desired_speed=self._rnd.gauss(mu=self._mu_v0, sigma=self._sigma_v0),
+            radius=self._rnd.gauss(mu=self._mu_d / 2, sigma=self._sigma_d / 2),
         )
-        new_agent.radius = self._rnd.gauss(
-            mu=self._mu_d / 2, sigma=self._sigma_d / 2
-        )
-        return new_agent
 
 
+@jps.trace_event
 def create_journeys(sim: jps.Simulation):
     gates = [
         (-1815.11, -175.23),
@@ -44448,21 +44439,20 @@ def main():
         model=jps.CollisionFreeSpeedModel(),
         geometry=geometries["grosser_stern"],
         trajectory_writer=stats_writer,
+        timer_log_level=3,
     )
-
+    jps.enable_tracing()
     journeys = create_journeys(simulation)
 
-    agent_parameters = jps.CollisionFreeSpeedModelAgentParameters()
-    agent_parameters.orientation = (1.0, 0.0)
-    agent_parameters.position = (0.0, 0.0)
-
-    for pos in positions:
-        agent_parameters.position = pos
-        journey, start_stage = random.choice(journeys)
-        agent_parameters.journey_id = journey
-        agent_parameters.stage_id = start_stage
-        p = profile_picker.randomise_radius_and_v0(agent_parameters)
-        simulation.add_agent(p)
+    with jps.trace_event("initialisation"):
+        for pos in positions:
+            journey, start_stage = random.choice(journeys)
+            simulation.add_agent(
+                journey_id=journey,
+                stage_id=start_stage,
+                position=pos,
+                state=profile_picker.random_state(),
+            )
 
     start_time = time.perf_counter_ns()
     iteration = simulation.iteration_count()
@@ -44472,8 +44462,8 @@ def main():
             iteration = simulation.iteration_count()
 
             dt = (time.perf_counter_ns() - start_time) / 1000000000
-            duration = simulation.get_last_trace().iteration_duration
-            op_dur = simulation.get_last_trace().operational_level_duration
+            duration = simulation.timer.iteration_duration_us
+            op_dur = simulation.timer.operational_level_duration_us
 
             print(
                 f"WC-Time: {dt:6.2f}s "
@@ -44486,7 +44476,12 @@ def main():
             )
         except KeyboardInterrupt:
             print("\nCTRL-C Received! Shutting down")
+            stats_writer.close()
+            jps.dump_traces("grosser_stern_perf_test_traces.ptrace")
             sys.exit(1)
+    stats_writer.close()
+    print(simulation.timer)
+    jps.dump_traces("grosser_stern_perf_test_traces.ptrace")
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 # libfmt
 ################################################################################
 set(FMT_INSTALL OFF)
-add_subdirectory(fmt-10.2.1)
+add_subdirectory(fmt)
 set_target_properties(fmt PROPERTIES
     POSITION_INDEPENDENT_CODE ON
     SYSTEM ON
@@ -11,12 +11,12 @@ set_target_properties(fmt PROPERTIES
 ################################################################################
 # boost
 ################################################################################
-find_package(Boost 1.82
+find_package(Boost 1.91
     REQUIRED
-    CONFIG
+    #CONFIG
     NO_DEFAULT_PATH
     PATHS
-    ${CMAKE_CURRENT_SOURCE_DIR}/boost-1.82.0
+    ${CMAKE_CURRENT_SOURCE_DIR}/boost-1.91.0
 )
 set_target_properties(Boost::boost PROPERTIES
 	IMPORTED_GLOBAL TRUE
@@ -35,12 +35,12 @@ set(CGAL_DATA_DIR "none")
 set(WITH_CGAL_ImageIO OFF)
 set(WITH_CGAL_Qt5 OFF)
 set(CGAL_DISABLE_GMP ON)
-find_package(CGAL 6.0
+find_package(CGAL 6.1.2
     REQUIRED
     CONFIG
     NO_DEFAULT_PATH
     PATHS
-    ${CMAKE_CURRENT_SOURCE_DIR}/cgal-6.0.1
+    ${CMAKE_CURRENT_SOURCE_DIR}/cgal
 )
 
 ################################################################################
@@ -49,16 +49,15 @@ find_package(CGAL 6.0
 set(Python_FIND_VIRTUALENV "FIRST")
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 set(PYBIND11_SIMPLE_GIL_MANAGEMENT ON)
-set(PYBIND11_NUMPY_1_ONLY ON)
 set(PYBIND11_FINDPYTHON ON)
-add_subdirectory(pybind11-2.12.0)
+add_subdirectory(pybind11)
 set(Python_EXECUTABLE ${Python_EXECUTABLE} PARENT_SCOPE)
 
 ################################################################################
 # Googletest
 ################################################################################
 if(BUILD_TESTS)
-    add_subdirectory(googletest-1.14.0)
+    add_subdirectory(googletest)
 endif()
 
 ################################################################################
@@ -69,11 +68,62 @@ if (BUILD_BENCHMARKS)
     set(BENCHMARK_ENABLE_INSTALL OFF)
     set(BENCHMARK_ENABLE_WERROR OFF)
     set(BENCHMARK_INSTALL_DOCS OFF)
-    add_subdirectory(benchmark-1.8.2)
+    add_subdirectory(benchmark)
 endif ()
 
 ################################################################################
 # glm
 ################################################################################
 set(GLM_ENABLE_CXX_20 ON CACHE BOOL "" FORCE)
-add_subdirectory(glm-1.0.1)
+add_subdirectory(glm)
+
+################################################################################
+# Perfetto SDK
+################################################################################
+
+add_library(perfetto STATIC perfetto/perfetto.cc)
+target_include_directories(perfetto PUBLIC perfetto)
+target_compile_features(perfetto PUBLIC cxx_std_17)
+set_target_properties(perfetto PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+if (WIN32)
+    # The perfetto library contains many symbols, so it needs the big object
+    # format.
+    target_compile_options(perfetto PRIVATE "/bigobj")
+    # Winsock symbols (e.g. accept) are provided by ws2_32 on Windows.
+    target_link_libraries(perfetto PUBLIC ws2_32)
+    # Disable legacy features in windows.h.
+    target_compile_definitions(
+        perfetto 
+        PRIVATE 
+        WIN32_LEAN_AND_MEAN 
+        NOMINMAX
+    )
+endif (WIN32)
+
+
+################################################################################
+# Corrosion (Rust/CMake integration)
+################################################################################
+if(APPLE AND CMAKE_OSX_ARCHITECTURES)
+    list(LENGTH CMAKE_OSX_ARCHITECTURES _cnt)
+    if(_cnt GREATER 1)
+        message(FATAL_ERROR
+            "Multi-arch builds are not supprted by rust, "
+            "please set a single architecture target. "
+            "Currently set: CMAKE_OSX_ARCHITECTURES=\"${CMAKE_OSX_ARCHITECTURES}\""
+        )
+    endif()
+    if(CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64")
+        set(Rust_CARGO_TARGET "x86_64-apple-darwin")
+    elseif(CMAKE_OSX_ARCHITECTURES STREQUAL "arm64")
+        set(Rust_CARGO_TARGET "aarch64-apple-darwin")
+    else()
+        message(
+            FATAL_ERROR
+            "Unknown architecture provided: "
+            "CMAKE_OSX_ARCHITECTURES=\"${CMAKE_OSX_ARCHITECTURES}\"")
+    endif()
+endif()
+add_subdirectory(corrosion)
+
