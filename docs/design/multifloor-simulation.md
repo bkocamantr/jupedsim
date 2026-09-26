@@ -355,3 +355,78 @@ Each phase is a mergeable PR that keeps all existing tests green.
   or need versioned `_V2` variants.
 * Agent-level preferences (stairs vs lift, escalator walking) — needs a small
   per-agent "routing profile" struct; defer to after phase 7.
+
+## 10. Estimated Claude Code usage cost
+
+This estimate assumes Claude Code (Opus 5.5) writes the code, and covers stairs as
+walkable areas: phases 1–5 plus output, API, tests and docs. These are planning
+numbers, not measurements. Recalibrate them after phase 1 using the actual usage
+reported for those sessions.
+
+### Pricing used (Anthropic API rates, per million tokens)
+
+| Model | Input | Output | Cache read | Cache write (1 h) |
+|---|---|---|---|---|
+| Opus 5.5 | $4.00 | $20.00 | $0.20 | $8.00 |
+
+On a Claude subscription plan (Pro, Max, Team, Enterprise), usage counts against
+the plan's limits instead of being billed per token. The figures below are what
+the same work would cost at API rates.
+
+### Cost of one working session
+
+A "session" is one focused chunk of work, for example "add `areaId` to agents and
+stages, update the tests, get CI green". Most of the input is the conversation
+context, which is re-read from the cache on every call.
+
+| | Light session | Heavy (debugging) session |
+|---|---|---|
+| Model calls | ~80 | ~250 |
+| Average context per call | ~80K tokens | ~180K tokens |
+| Cache reads | 6.4M → $1.30 | 45M → $9.00 |
+| Cache writes (new content per call, 3K–5K) | 0.24M → $1.90 | 1.25M → $10.00 |
+| Output incl. thinking (1.5K–3K per call) | 0.12M → $2.40 | 0.75M → $15.00 |
+| **Total** | **~$6–8** | **~$30–35** |
+
+The ranges below use **$8–30 per session**.
+
+### Breakdown by phase
+
+| Phase | Sessions | Estimated cost |
+|---|---|---|
+| 1. Refactor to a single `Area` | 3–5 | $25–150 |
+| 2. Multiple unconnected areas | 4–6 | $30–180 |
+| 3. Portals and area transitions (most debugging) | 8–14 | $65–420 |
+| 4. Routing across areas | 6–10 | $50–300 |
+| 5. Stairs (elevation, speed factors, 3D position) | 3–5 | $25–150 |
+| Output v3, C/Python API, tests, docs, example | 6–10 | $50–300 |
+| **Total (stairs as walkable areas)** | **30–50** | **~$250–1,500, most likely ~$600** |
+
+Comparisons and add-ons:
+
+* **Stairs as a "portal with a time delay"**: phase 3 drops to 3–5 sessions and
+  phase 5 to 1–2, for a total of **~$185–1,150**. Stairs as walkable areas cost
+  roughly **$60–360 more** at API rates.
+* **Escalators / moving walkways**: +3–6 sessions, **+$25–180**.
+* **Lifts**: +8–12 sessions, **+$65–360**.
+
+### What moves the number
+
+* **Debugging loops dominate.** Portal crossing and cross-portal neighbour
+  handling (phase 3) is where the high end comes from. Good unit tests written
+  up front shorten these loops.
+* **Context size.** Long sessions re-read a large context on every call. Short,
+  single-purpose sessions (one PR, one phase) keep this down.
+* **C++ build and test output.** Long CGAL compile errors or verbose test logs
+  sent back to Claude add input tokens. Filtering build output helps.
+* **Effort level.** Higher effort means more thinking (output) tokens: more
+  expensive per call, but usually fewer failed attempts on hard phases.
+* **Model choice.** Sonnet 5 ($2 / $10 per million tokens) costs roughly
+  half as much per token. On the harder phases (3 and 4) it may need more
+  iterations, so compare it on a real phase before switching.
+
+### Not included
+
+* Your own review and testing time.
+* CI compute.
+* Calibrating stair speed factors against measured data.
