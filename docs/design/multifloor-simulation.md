@@ -1,432 +1,252 @@
-# Design: Multi-floor (2.5D) simulation in JuPedSim
+# Design: Multi-floor simulation in JuPedSim
 
-Status: **Proposal / plan** — no code changes yet.
+Status: **Proposal / plan, revised after syncing with upstream** (upstream
+`PedestrianDynamics/jupedsim` master as of 2026-09-23, commit `098099e2`).
 
-## 1. Where we are today
+The first version of this plan was written against a fork that was still on
+v1.3.0 (June 2025). Upstream has since landed
+"First version of multi-floor building support" (`4d0fe0f8`, 2026-09-04),
+which already implements most of that plan's core: floors, stairs and ramps,
+3D positions and routing. This revision describes what upstream now provides,
+what is still missing, and how to add the missing parts on top of upstream's
+design instead of beside it.
 
-Everything in the simulator assumes exactly one planar walkable area:
+## 1. What upstream already provides
 
-| Component | File | Single-geometry assumption |
+| Capability | Where | Notes |
 |---|---|---|
-| `Simulation` | `libsimulator/src/Simulation.{hpp,cpp}` | Holds one active `_geometry` + `_routingEngine` pair. The `geometries` map only exists to cache geometries for `SwitchGeometry`; only one is active at a time. |
-| `CollisionGeometry` | `libsimulator/src/CollisionGeometry.hpp` | One `PolyWithHoles`, one wall-segment grid. |
-| `GeometryBuilder` | `libsimulator/src/GeometryBuilder.{hpp,cpp}` | Unions every added polygon into *one* polygon; `Build()` fails when the result is not one connected polygon. |
-| `RoutingEngine` | `libsimulator/src/RoutingEngine.{hpp,cpp}` | Navmesh (CGAL CDT) over one polygon; `ComputeWaypoint(Point, Point)`. |
-| `NeighborhoodSearch` | `libsimulator/src/NeighborhoodSearch.hpp` | 2D grid over `agent.pos`; agents on different floors at the same (x,y) would interact. |
-| `GenericAgent` | `libsimulator/src/GenericAgent.hpp` | Only `Point pos` (x, y). No notion of floor/area. |
-| Stages | `StageDescription.hpp`, `Stage.hpp` | Positions are bare `Point`s; waiting sets/queues query the single geometry. |
-| Systems | `TacticalDecisionSystem`, `OperationalDecisionSystem`, `StageSystem` | Receive one `RoutingEngine&` / `CollisionGeometry&`. |
-| Operational models | `*Model.cpp` | `ComputeNewPosition(dT, agent, geometry, neighborhoodSearch)` — pure 2D, one geometry. |
-| C API | `libjupedsim/include/jupedsim/{geometry,simulation,agent,stage}.h` | `JPS_Simulation_Create(model, geometry, dt)`; `JPS_Point` is 2D. |
-| Python | `python_bindings_jupedsim/`, `python_modules/jupedsim/` | `Simulation(model, geometry, ...)`, `build_geometry`, `Geometry.boundary()`. |
-| Output | `sqlite_serialization.py` | `trajectory_data(frame,id,pos_x,pos_y,ori_x,ori_y)`, one WKT geometry per frame. |
-| Visualizer | `python_modules/jupedsim_visualizer` | 2D only. |
+| Floors at different heights | `Geometry/WalkableSurface.{hpp,cpp}`: `AddRegion(polygon, height)` | Overlapping floors at the same height are rejected (`ValidateFloorOverlap`). |
+| Stairs and ramps as walkable, inclined connectors | `WalkableSurface::ConnectRegions(fromRegion, fromEdge, toRegion, toEdge)` | A connector is its own inclined region spanning the two edges. Inclines above 50° are rejected (`Geometry/Validation.cpp`). |
+| Arbitrary 3D mesh input | `Geometry(SurfaceMesh)`, OBJ files (`examples/geometry/*.obj`) | Upstream says the OBJ input "will change". |
+| Automatic split into 2D regions | `Geometry/RegionSplit.{hpp,cpp}` | Each region projects to the x/y plane without overlapping itself, so the models can keep working in 2D. |
+| Agent positions with floor information | `Geometry/Location.hpp`; `GenericAgent::location` | 2D `xy` plus region ID plus cached `z`. `move_on_surface()` carries agents across region seams. |
+| Wall queries across regions | `Geometry::line_segments_in_range`, `no_geometry_between` | Ray-cast and exact: no walls behind walls, and sight lines cross seams. |
+| Neighbours on other floors ignored | `AgentView.hpp` | Candidates more than `InteractionHeight` (2 m) apart in z are skipped. |
+| 3D routing | `SurfaceMeshShortestPathRoutingEngine` | Exact shortest paths on the surface mesh (CGAL), held off wall corners by a clearance. It replaced the old navmesh router. |
+| Python API | `jps.WalkableSurface`, `add_region`, `connect_regions`; `z_hint=` on agents and stages; `jps.Location` | Upstream: "The Python API is not finalized", and `z_hint` "is likely to change to regions". |
+| Examples | `examples/example_3d.py` (U-shaped stair), `examples/example_office_5floors.py` | |
+| 3D viewer | `python_modules/trame_viewer`, `examples/simulation_viewer.py` | Upstream calls it temporary, for debugging. |
 
-## 2. Modelling approach (the key decision)
+Other upstream changes that affect this work:
 
-**Recommended: a "2.5D" model — a graph of planar walkable areas.**
+* **The C API (`libjupedsim`) was removed** (`c5bc7467`, 2025-11-16). Python
+  (pybind11) is the only public interface. The C API section of the old plan
+  is dropped.
+* The operational models moved to `libsimulator/src/OperationalModels/<Model>/`.
+  Each model implements
+  `Point ComputeNextState(current, next, const AgentStep&)`, which returns the
+  horizontal movement for one step. `OperationalDecisionSystem` then applies it
+  with `location.move_on_surface(movement)`.
+* There are now 8 model types: CFSM, CFSM V2, CFSM V3, AVM, GCFM, SFM,
+  WarpDriver, and custom models written in Python.
+* `EnvironmentQuery` / `AgentView` / `AgentStep` are the single interface
+  through which models see walls and neighbours.
 
-* The building is described as a set of **walkable areas** (`Area`). Each area is a
-  planar polygon-with-holes in its own local 2D plane plus an **elevation
-  function** `z(x, y)` (constant for floors, linear for stairs/ramps/escalators).
-* Areas are connected by **connectors**. A connector either
-  * is a shared **portal** edge between two walkable areas (floor ↔ stair, stair ↔ landing,
-    floor ↔ escalator), which agents walk across, or
-  * is a **discrete transport** (lift) that removes an agent from one area and
-    re-inserts it into another after a travel time.
-* Agent state gains an `areaId`; `pos` stays 2D (x, y in plan view). The 3D
-  position is derived: `(x, y, area.Elevation(x, y))`.
+## 2. What is still missing
 
-Why not full 3D (`Point3`, 3D navmesh, 3D collision)?
-
-* All operational models (CFSM, CFSM v2, AVM, GCFM, SFM) are formulated in the
-  plane. Keeping them 2D per area means **no model code has to be rewritten**.
-* Stairs are physically 2D walking surfaces; their slope only matters as a
-  speed modifier and for output. The plan-view projection is sufficient.
-* CGAL CDT-based routing, the wall grid and the neighbour grid can be reused
-  per area unchanged.
-* It is backwards compatible: a single-area simulation is exactly today's
-  behaviour.
-
-Connector taxonomy:
-
-| Connector | Representation | Behaviour |
+| Gap | Current behaviour | Why it matters |
 |---|---|---|
-| Door / opening between areas on the same level | Portal edge | Agents cross freely. |
-| Stair | Walkable `Area` with linear `z(x,y)`, `speedFactorUp`, `speedFactorDown` + 2 portals | Desired speed scaled by direction of travel along slope. |
-| Ramp | Same as stair, different default factors | as above |
-| Escalator | Walkable `Area` + portals, **direction** (one-way), **conveyor velocity** | Only traversable in one direction; conveyor velocity added to agent's motion; optional "stand right / walk left" later. |
-| Moving walkway | Escalator with constant `z` | as above |
-| Lift | Discrete connector: per served area a **boarding zone** (waiting slots) + capacity, door time, travel time per floor, schedule/call logic | Agents queue, board up to capacity, are removed from source area, re-inserted at the destination's exit slots after travel time. |
+| **Walking speed on stairs and ramps** | Upstream: "Models still only see 2D." Agents cross a stair at their flat-ground horizontal speed. | Stair capacity and travel time are usually what a multi-floor study is about. Real walking speeds on stairs are much lower than on flat ground, and differ between going up and down. |
+| **Escalators and moving walkways** | None. | They need one-way travel and a belt velocity. |
+| **Lifts** | None. | Not a walkable surface. Agents wait, board, disappear and reappear on another floor after a travel time. |
+| **Routing through one-way or discrete connections** | The surface shortest-path router treats every walkable face as usable in both directions. | Escalators (one-way) and lifts (not walkable) can't be expressed as surface paths. |
+| **Floor information in trajectory output** | SQLite stores only `pos_x`, `pos_y`. The HDF5 writer has a `z` column but always writes `0.0`. Neither stores the region. | Results can't be analysed per floor, and the 3D geometry isn't saved. |
+| **Stable, region-based Python API** | `z_hint` float on agents and stages. | Upstream plans to switch to regions. |
+| **Visualiser** | `jupedsim_visualizer` is 2D only; the trame viewer is a temporary debugging tool. | |
 
-## 3. Architecture changes (C++ core, `libsimulator`)
+## 3. Strategy
 
-### 3.1 New types
+1. **Build on upstream's design, not beside it.** Stairs and ramps stay
+   upstream's inclined connector regions; positions stay `Location`; routing
+   stays surface-based within connected walkable parts.
+2. **Coordinate with the upstream maintainers before starting.** The multi-floor code
+   is three weeks old and explicitly unfinished (input format, Python API,
+   viewer). Open an issue or discussion on `PedestrianDynamics/jupedsim` with
+   this plan. Agree which parts upstream is already doing, so work isn't done
+   twice, and send the rest as upstream PRs.
+3. **Keep the fork in sync.** Merge upstream master at least before each phase.
+   The multi-floor code is changing fast, and a stale fork is what caused the
+   first version of this plan to miss it.
 
-```cpp
-// Area.hpp
-class Area {
-public:
-    using ID = jps::UniqueID<Area>;
-    ID id;
-    std::string name;                                  // "Floor 1", "Stair A" ...
-    AreaKind kind;                                     // Floor, Stair, Ramp, Escalator, Walkway
-    std::unique_ptr<CollisionGeometry> geometry;
-    std::unique_ptr<RoutingEngine> routing;
-    NeighborhoodSearch<GenericAgent> neighbors{2.2};
-    ElevationFunction elevation;                       // constant or plane z = a*x + b*y + c
-    AreaMotionParams motion;                           // speed factors, conveyor vel, direction
-    std::vector<Portal::ID> portals;
-};
+## 4. Changes, by gap
 
-// Portal.hpp : shared edge between two areas
-struct Portal {
-    using ID = jps::UniqueID<Portal>;
-    LineSegment segmentInA, segmentInB;   // identical in plan view for stairs/floors
-    Area::ID a, b;
-    bool aToB = true, bToA = true;        // escalators are one-way
-};
+### 4.1 Stair and ramp walking speed
 
-// Lift.hpp : discrete connector
-class Lift {
-    using ID = jps::UniqueID<Lift>;
-    std::map<Area::ID, LiftStop> stops;   // boarding slots + exit slots per area
-    size_t capacity; double doorTime; double travelTimePerMeter; ...
-    // state machine: Idle -> DoorsOpen -> Boarding -> Moving -> Alighting ...
-};
+* Add the slope at the agent's position to what models can query: e.g.
+  `AgentView::surface_gradient()`, returning the x/y gradient of `z` on the face
+  the agent stands on. `Location` already has the face cached.
+* Add a speed factor per region, defaulting to 1.0 for floors. Connectors get
+  `speed_factor_up` and `speed_factor_down`, set in
+  `WalkableSurface::ConnectRegions`/`connect_regions(...)`. Both have defaults
+  (to be calibrated) and can be overridden per connector.
+* **Where to apply it:** scale the agent's *desired speed* through `AgentStep`
+  (e.g. `step.desired_speed_factor()`), which each model reads when it computes
+  its target velocity. Do **not** scale the movement returned by
+  `ComputeNextState`. For second-order models (GCFM, SFM, WarpDriver) the
+  velocity is stored in the model state, so rescaling only the movement would
+  make position and velocity disagree. This touches all 7 built-in models,
+  with one line each at the point where `desired_speed` is used. Custom Python
+  models get the factor through their `AgentStep` binding.
+* Up or down is decided from the sign of `dot(desired direction, gradient)`.
+* Plan-view speed is additionally scaled by `cos(slope)`, so the configured
+  speed means speed *along* the stair, as measured in experiments.
 
-// Building.hpp : owns all of the above, validates connectivity
-class Building {
-    std::unordered_map<Area::ID, Area> areas;
-    std::unordered_map<Portal::ID, Portal> portals;
-    std::unordered_map<Lift::ID, Lift> lifts;
-    MultiLevelRoutingGraph routingGraph;   // see 3.4
-};
-```
+### 4.2 Directed connectivity and a two-level router
 
-`BuildingBuilder` replaces the role of `GeometryBuilder` for multi-area input:
-`AddArea(polygon, holes, elevation, kind, params)`, `AddPortal(areaA, areaB,
-segment)` (or auto-detect portals from coincident boundary edges, with a
-tolerance), `AddLift(...)`. It validates: every portal segment lies on the
-boundary of both areas, areas on the same elevation don't overlap unless
-separated, graph is connected (warn otherwise).
+Needed before escalators and lifts.
 
-`GeometryBuilder` stays and is used internally per area; a single-area building
-is produced implicitly from a plain `CollisionGeometry` (backwards compat).
+* Keep `SurfaceMeshShortestPathRoutingEngine` for movement **within** a
+  connected walkable part.
+* Add a **connection graph** on top of it. Its nodes are one-way seams (escalator
+  entries and exits) and lift stops. Its edges are:
+  * surface travel between two nodes, weighted by the surface shortest-path length
+    divided by speed (computed once, then cached);
+  * escalator traversal: one direction only, weighted by length / (belt speed + walking speed);
+  * lift trips, weighted by expected waiting time + door time + travel time.
+* A route query picks the best sequence of connections (Dijkstra or A*), then
+  hands the surface router the next leg's target. `WalkableSurface` already
+  builds a boost region graph (`RegionGraph2D`) that the connection graph can
+  start from.
+* `TacticalDecisionSystem` asks this two-level router for `nextTarget`.
 
-### 3.2 Agent
+### 4.3 Escalators and moving walkways
 
-```cpp
-struct GenericAgent {
-    ...
-    Area::ID areaId;                 // NEW – area the agent currently stands in
-    std::optional<Lift::ID> inLift;  // NEW – agent is being transported, not simulated in any area
-    std::vector<RouteLeg> route;     // NEW – cached multi-area route (see 3.4)
-};
-```
+* A new connector kind: `WalkableSurface::ConnectRegions(..., ConnectorKind::Escalator,
+  direction, belt_speed)`. Geometrically it is an inclined region like a stair.
+  A moving walkway is the same thing with no height change.
+* **One-way travel:** in `Location::move_on_surface`, crossing the entry seam
+  against the direction of travel is blocked as if it were a wall. The
+  router (4.2) never plans a route against the direction.
+* **Belt velocity:** added to the agent's movement **after** `ComputeNextState`,
+  in `OperationalDecisionSystem`. Unlike the stair factor, the belt moves the
+  ground under the agent, not the agent's own velocity. Optionally, agents can
+  stand still on the escalator (desired speed factor 0).
 
-### 3.3 Simulation loop
+### 4.4 Lifts
 
-`Simulation` holds a `Building` instead of `_geometry/_routingEngine`.
-`Iterate()` becomes:
+* A new `Lift` entity and `LiftSystem`, run once per iteration in
+  `Simulation::Iterate()` after the operational step.
+  * One stop per served floor. A stop has a boarding area, reusing the
+    `NotifiableWaitingSet` slots, and exit positions.
+  * Settings: capacity, door time, speed, and a dispatch strategy (simple
+    collective control first).
+  * Agents waiting at a stop board when the lift is at that floor with its doors
+    open. Boarded agents are taken out of the neighbour grid and the
+    operational step. They are re-inserted at the destination's exit
+    positions, using `Geometry::get_location` with the stop's height.
+* Agent state gains `std::optional<LiftId> inLift`. Agents inside a lift are
+  skipped by the neighbour search and the models, and output reports them
+  with the lift ID.
+* The router (4.2) treats lift trips as edges. When the route's next
+  connection is a lift, the strategic system gives the agent the lift's
+  boarding stage as its target.
 
-1. `AgentRemovalSystem` — unchanged.
-2. **Neighbourhood update per area** (each area has its own grid, agents are
-   bucketed by `areaId`). Agents inside a lift are in no grid.
-3. `StageSystem` — stages now carry an `areaId`; they are updated with their
-   own area's geometry/grid.
-4. `StrategicalDecisionSystem` — unchanged (journeys/stages are area-agnostic
-   IDs; stage positions carry the area).
-5. `TacticalDecisionSystem` — uses the multi-level router: if the target is in
-   another area, the next waypoint is the best portal/lift on the route
-   (see 3.4); within an area it is today's funnel-algorithm waypoint.
-6. `OperationalDecisionSystem` — runs the model **per area**, passing the
-   area's `CollisionGeometry` and `NeighborhoodSearch`. Then applies area
-   motion params (speed factor, conveyor velocity).
-7. **NEW `AreaTransitionSystem`** — after positions are applied, detects
-   agents whose step crossed a portal segment (segment/segment intersection of
-   `oldPos→newPos` with the portal) and moves them to the other area
-   (`areaId` update, neighbour grid update). Rejects crossing of one-way
-   portals in the wrong direction (treated as a wall).
-8. **NEW `LiftSystem`** — advances each lift's state machine, boards agents
-   waiting at the boarding slots, removes/re-inserts agents on arrival.
-9. Clock advance.
+### 4.5 Output
 
-Parallelism opportunity: steps 2–6 are independent per area.
+* **SQLite:** bump the format version. Add `pos_z` and `region` columns
+  to `trajectory_data`, plus an `in_lift` column once 4.4 exists. Store the
+  mesh (`Geometry::vertices()`, `triangles()`, `region_id_per_face()`) in a new
+  `geometry_mesh` table. Keep the WKT geometry for 2D-only readers such as
+  PedPy.
+* **HDF5:** write `agent.location.z` instead of the hard-coded `0.0`, and add
+  `region`.
+* Helper to export per-floor 2D trajectories for PedPy.
 
-**Interaction across portals.** At a portal, agents on both sides must see
-each other and the walls around the opening. Two options:
+### 4.6 Python API, docs and viewer
 
-* (a) *Overlap band*: each area's collision geometry and neighbour query
-  includes a strip (≈ neighbour radius) of the adjacent area beyond each
-  portal. Neighbour queries near a portal also query the adjacent area's grid.
-* (b) Treat portal edges as non-walls and query adjacent area grids when the
-  query circle intersects a portal.
+* Follow upstream's move from `z_hint` to regions:
+  `add_agent(..., region=upper)`, `add_exit_stage(..., region=upper)`.
+  Keep `z_hint` as an alternative.
+* Keyword arguments for the stair speed factors and escalator settings on
+  `connect_regions`, plus `jps.Lift(...)`.
+* 2D visualiser: add a floor selector, showing one region stack at a time. Leave 3D
+  viewing to upstream's viewer work.
+* A docs concept page and a notebook: two floors, a stair, an escalator, a lift.
 
-Recommend (b): `NeighborhoodSearch` query wrapper `BuildingNeighbors::Query(areaId,
-pos, r)` that also looks into areas whose portal segment is within `r` of
-`pos`. Plan-view coordinates of stair and floor coincide at the portal, so no
-coordinate transform is needed. Wall segments of an area are only its
-boundary *minus* portal segments (portals are open edges).
+## 5. Testing
 
-### 3.4 Routing
+* **C++ unit tests (`libsimulator/test`):**
+  * slope and gradient queries;
+  * the speed factor applied in each model;
+  * one-way seam blocking;
+  * connection-graph shortest paths;
+  * the lift state machine and capacity.
+* **Python tests / system tests:**
+  * all existing tests still pass (flat geometries behave the same);
+  * travel time on a stair of known length matches the configured factors, up and down;
+  * no agent ever moves against an escalator's direction;
+  * lift throughput never exceeds its capacity, and travel time is accounted for;
+  * the 5-floor office example evacuates completely.
+* **Output round-trip:** z and region are written and read back correctly, in
+  both SQLite and HDF5.
 
-Two levels, both reusing existing code:
+## 6. Phases
 
-* **Intra-area**: existing `RoutingEngine` per area (navmesh + funnel).
-* **Inter-area**: `MultiLevelRoutingGraph` — nodes are portals (midpoint /
-  segment) and lift stops; edges:
-  * portal ↔ portal within the same area, weight = navmesh path length /
-    (area speed factor) — precomputed with `RoutingEngine::ComputeAllWaypoints`;
-  * lift stop ↔ lift stop, weight = expected waiting + travel time;
-  * escalator edges only in their direction.
+Each phase is one upstream-ready PR, preceded by a merge of upstream master.
 
-  Query `Route(areaFrom, pos, areaTo, target)`: temporarily attach start and
-  goal nodes, run Dijkstra/A* (z-aware heuristic), return a list of
-  `RouteLeg{areaId, exitPortal | liftId}`. Cache per (agent, target) and
-  recompute on stage change or area change.
-
-  The waypoint for the operational model is the navmesh waypoint towards the
-  *closest point on the chosen exit portal segment* (not its midpoint, to
-  avoid congestion at the centre of wide openings).
-
-Later extensions (not in first milestone): congestion-aware edge weights,
-agent preferences (avoid stairs, prefer lifts for mobility-impaired agents),
-per-agent routing profiles.
-
-### 3.5 Stages
-
-Each `StageDescription` gets an `Area::ID`:
-
-```cpp
-struct WaypointDescription { Area::ID area; Point position; double distance; };
-struct ExitDescription     { Area::ID area; Polygon polygon; };
-...
-```
-
-Validation (`AddStage`, `ValidateGeometry`) checks against that area's
-geometry. Stage "reached" checks also compare `agent.areaId`.
-
-### 3.6 Operational models
-
-No change to the model formulas. Changes around them:
-
-* `OperationalModel::ComputeNewPosition` signature is kept; it receives
-  the agent's area geometry and a neighbour view that already merges
-  cross-portal neighbours.
-* New `AreaMotionModifier` applied in `OperationalDecisionSystem`:
-  * stairs/ramps: scale `v0` by `speedFactorUp`/`speedFactorDown`, determined
-    from `sign(dot(desiredDirection, gradient(z)))`; plan-view speed
-    additionally scaled by `cos(slope)` so that walking speed *along* the
-    stair surface is correct.
-  * escalators/walkways: add conveyor velocity vector to the displacement
-    after the model step; agents may be set to "standing" (v0 = 0).
-* Model-specific `v0` access is centralised in a small helper (each `*Data`
-  struct has its own `v0` field) — needed so modifiers work for all 5 models.
-
-### 3.7 SwitchGeometry
-
-Generalise to `SwitchAreaGeometry(areaId, geometry)` (e.g. closing a fire door
-on one floor). The existing single-geometry `SwitchGeometry` maps to the
-default area.
-
-## 4. C API (`libjupedsim`)
-
-Additive, ABI-compatible:
-
-```c
-typedef uint64_t JPS_AreaId;
-typedef uint64_t JPS_PortalId;
-typedef uint64_t JPS_LiftId;
-typedef struct JPS_Point3 { double x, y, z; } JPS_Point3;   // output only
-
-typedef struct JPS_BuildingBuilder_t* JPS_BuildingBuilder;
-JPS_BuildingBuilder JPS_BuildingBuilder_Create();
-JPS_AreaId JPS_BuildingBuilder_AddArea(JPS_BuildingBuilder, JPS_Geometry geometry,
-                                       JPS_AreaDescription desc /* kind, elevation, params */);
-JPS_PortalId JPS_BuildingBuilder_AddPortal(JPS_BuildingBuilder, JPS_AreaId a, JPS_AreaId b,
-                                           JPS_Point p1, JPS_Point p2, bool aToB, bool bToA);
-void JPS_BuildingBuilder_AutoDetectPortals(JPS_BuildingBuilder, double tolerance);
-JPS_LiftId JPS_BuildingBuilder_AddLift(JPS_BuildingBuilder, JPS_LiftDescription desc);
-JPS_Building JPS_BuildingBuilder_Build(JPS_BuildingBuilder, JPS_ErrorMessage*);
-
-JPS_Simulation JPS_Simulation_CreateMultiArea(JPS_OperationalModel, JPS_Building, double dt,
-                                              JPS_ErrorMessage*);
-
-// stages: *_InArea variants, e.g.
-JPS_StageId JPS_Simulation_AddStageWaypointInArea(JPS_Simulation, JPS_AreaId, JPS_Point, double,
-                                                  JPS_ErrorMessage*);
-// agents: JPS_<Model>AgentParameters gain `JPS_AreaId areaId` (0 = default area)
-JPS_AreaId JPS_Agent_GetAreaId(JPS_Agent);
-JPS_Point3 JPS_Agent_GetPosition3D(JPS_Agent);
-bool JPS_Agent_IsInLift(JPS_Agent);
-```
-
-Existing `JPS_Simulation_Create(model, geometry, dt)` keeps working by creating
-a one-area building. Parameter structs get a new trailing field defaulting to
-the default area; C++/Python callers are updated accordingly.
-
-## 5. Python (`python_bindings_jupedsim`, `python_modules/jupedsim`)
-
-* pybind11: expose `Building`, `BuildingBuilder`, `AreaDescription`,
-  `LiftDescription`, area/portal/lift IDs, new agent accessors.
-* High-level API:
-
-```python
-floor0 = jps.Floor(polygon0, elevation=0.0, name="GF")
-floor1 = jps.Floor(polygon1, elevation=3.5, name="1F")
-stair  = jps.Stair(stair_polygon, bottom_edge=((10,0),(10,2)), top_edge=((15,0),(15,2)),
-                   bottom=floor0, top=floor1)       # derives z(x,y) and the two portals
-esc    = jps.Escalator(poly, bottom_edge=..., top_edge=..., bottom=floor0, top=floor1,
-                       direction="up", speed=0.5)
-lift   = jps.Lift(stops={floor0: boarding_poly0, floor1: boarding_poly1}, capacity=13,
-                  speed=1.0, door_time=3.0)
-building = jps.Building(areas=[floor0, floor1, stair, esc], lifts=[lift])
-
-sim = jps.Simulation(model=..., building=building, ...)   # `geometry=` still accepted
-exit_id = sim.add_exit_stage(exit_poly, area=floor1)
-sim.add_agent(jps.CollisionFreeSpeedModelAgentParameters(position=(1, 1), area=floor0, ...))
-agent.area_id, agent.position_3d, agent.in_lift
-```
-
-* Input helpers: accept a dict `{name: shapely.Polygon}` per floor; optional
-  loader for a simple JSON/GeoJSON building description (floors, stairs,
-  lifts); later DXF/IFC import as separate tooling.
-* `distributions.py`: per-area agent distribution (unchanged math, area
-  argument passed through).
-
-## 6. Output & visualisation
-
-* SQLite trajectory format version bump (v2 → v3):
-  * `trajectory_data(frame, id, pos_x, pos_y, pos_z, ori_x, ori_y, area_id)`
-  * `areas(id, name, kind, elevation_expr, wkt)` table; `geometry` table keyed by
-    area; `portals` and `lifts` tables for the visualiser.
-  * Reader keeps v1/v2 support. `pedpy` compatibility: allow exporting a
-    per-floor 2D trajectory file.
-* `jupedsim_visualizer`: floor selector (show one area stack at a time,
-  stairs visible on both adjacent floors), optional isometric/3D view later.
-* `notebook_utils.py` plotting helpers: `area=` filter.
-
-## 7. Testing
-
-* **Unit (C++, `libsimulator/test`)**: `Area`/`ElevationFunction`,
-  `BuildingBuilder` validation (bad portals, disconnected graph, overlapping
-  areas), portal crossing detection incl. one-way portals, cross-portal
-  neighbour queries, `MultiLevelRoutingGraph` shortest paths, lift state machine.
-* **Library tests (`librarytest`)**: C API round-trips, backwards compatibility of
-  `JPS_Simulation_Create` with a single geometry.
-* **Python tests / systemtests**:
-  * Regression: all existing tests unchanged → single-area path is identical.
-  * Two floors + one stair: all agents reach an exit on the upper floor;
-    no agent ever leaves its area except through a portal.
-  * Escalator one-way enforcement; lift capacity and travel-time accounting.
-  * RiMEA-style stair test: flow/speed on stairs matches configured factors.
-* Performance test: many-area building vs. single large geometry.
-
-## 8. Implementation phases
-
-Each phase is a mergeable PR that keeps all existing tests green.
-
-1. **Refactor to `Area` (no behaviour change).** Introduce `Area` and
-   `Building` holding exactly one area; route `Simulation` through it; add
-   `areaId` to agents/stages with a default value. Replace
-   `_geometry/_routingEngine` members.
-2. **Multiple disconnected areas.** Per-area neighbour search, per-area model
-   execution, per-area stage validation; C/Python API to create areas and place
-   agents/stages in them. (Useful by itself: independent floors in one run.)
-3. **Portals + area transitions.** `AreaTransitionSystem`, cross-portal
-   neighbour/wall handling, `BuildingBuilder` portal validation / auto-detection.
-4. **Multi-level routing.** `MultiLevelRoutingGraph`, route caching, tactical
-   system integration.
-5. **Stairs and ramps.** Elevation functions, speed modifiers, `Point3` output.
-6. **Escalators / moving walkways.** One-way portals, conveyor velocity.
-7. **Lifts.** Lift system, state machine, stages for boarding, API.
-8. **Output v3 + visualiser + docs/notebooks.** Multi-floor example notebook
-   (two floors, stair, escalator, lift), concepts page in `docs/source/concepts`.
-
-## 9. Open questions
-
-* Should stairs be first-class areas (proposed) or a special portal with
-  length/time? First-class areas give realistic congestion on stairs; a
-  "portal with delay" is cheaper and could be offered as a simplified option.
-* Portal auto-detection tolerance and handling of partially overlapping edges.
-* Lift dispatch strategy (simple collective control first; pluggable later).
-* Whether `JPS_*AgentParameters` structs may be extended in-place (ABI break)
-  or need versioned `_V2` variants.
-* Agent-level preferences (stairs vs lift, escalator walking) — needs a small
-  per-agent "routing profile" struct; defer to after phase 7.
-
-## 10. Estimated Claude Code usage cost
-
-This estimate assumes Claude Code (Opus 5.5) writes the code, and covers stairs as
-walkable areas: phases 1–5 plus output, API, tests and docs. These are planning
-numbers, not measurements. Recalibrate them after phase 1 using the actual usage
-reported for those sessions.
-
-### Pricing used (Anthropic API rates, per million tokens)
-
-| Model | Input | Output | Cache read | Cache write (1 h) |
-|---|---|---|---|---|
-| Opus 5.5 | $4.00 | $20.00 | $0.20 | $8.00 |
-
-On a Claude subscription plan (Pro, Max, Team, Enterprise), usage counts against
-the plan's limits instead of being billed per token. The figures below are what
-the same work would cost at API rates.
-
-### Cost of one working session
-
-A "session" is one focused chunk of work, for example "add `areaId` to agents and
-stages, update the tests, get CI green". Most of the input is the conversation
-context, which is re-read from the cache on every call.
-
-| | Light session | Heavy (debugging) session |
+| Phase | Content | Depends on |
 |---|---|---|
-| Model calls | ~80 | ~250 |
-| Average context per call | ~80K tokens | ~180K tokens |
-| Cache reads | 6.4M → $1.30 | 45M → $9.00 |
-| Cache writes (new content per call, 3K–5K) | 0.24M → $1.90 | 1.25M → $10.00 |
-| Output incl. thinking (1.5K–3K per call) | 0.12M → $2.40 | 0.75M → $15.00 |
-| **Total** | **~$6–8** | **~$30–35** |
+| 0 | Sync fork with upstream (**done**); open an upstream issue with this plan | – |
+| 1 | Output: z and region in SQLite and HDF5, mesh stored in SQLite | – |
+| 2 | Stair and ramp speed factors (4.1) | – |
+| 3 | Connection graph and two-level router (4.2) | – |
+| 4 | Escalators and moving walkways (4.3) | 3 |
+| 5 | Lifts (4.4) | 3 |
+| 6 | Region-based Python API, visualiser floor selector, docs, notebook (4.6) | 1–5, coordinated with upstream |
 
-The ranges below use **$8–30 per session**.
+Phases 1, 2 and 3 are independent and can run in parallel.
 
-### Breakdown by phase
+## 7. Open questions (for upstream)
+
+* Is upstream already working on any of stair speed, escalators, lifts, output
+  or the region-based API? If so, which?
+* Where do stair speed factors belong: in the geometry (per connector) or in the
+  agent (per-agent stair ability)? Probably both: a per-connector default
+  multiplied by a per-agent factor.
+* Is upstream planning a replacement for OBJ input (e.g. IFC or DXF), which
+  would need to carry connector kinds (stair, escalator, lift)?
+* Should the connection graph (4.2) live inside the routing engine or sit
+  above it as a separate strategic layer?
+* Lift dispatch: which strategies are needed first?
+
+## 8. Estimated Claude Code usage cost
+
+This assumes Claude Code (Opus 5.5) writes the code, at Anthropic API rates:
+$4 per million input tokens, $20 per million output tokens, $0.20 per million
+for cache reads, $8 per million for 1-hour cache writes. On a Claude
+subscription plan, usage counts against plan limits instead of being billed.
+These are planning numbers; recalibrate them after the first phase.
+
+A working session (one focused chunk of work, most input re-read from cache)
+comes to about **$8** when light (~80 calls, ~80K context) and **$30** when
+debugging-heavy (~250 calls, ~180K context).
 
 | Phase | Sessions | Estimated cost |
 |---|---|---|
-| 1. Refactor to a single `Area` | 3–5 | $25–150 |
-| 2. Multiple unconnected areas | 4–6 | $30–180 |
-| 3. Portals and area transitions (most debugging) | 8–14 | $65–420 |
-| 4. Routing across areas | 6–10 | $50–300 |
-| 5. Stairs (elevation, speed factors, 3D position) | 3–5 | $25–150 |
-| Output v3, C/Python API, tests, docs, example | 6–10 | $50–300 |
-| **Total (stairs as walkable areas)** | **30–50** | **~$250–1,500, most likely ~$600** |
+| 1. Output (z, region, mesh) | 2–4 | $15–120 |
+| 2. Stair and ramp speed factors | 3–5 | $25–150 |
+| 3. Connection graph and two-level router | 6–10 | $50–300 |
+| 4. Escalators and moving walkways | 3–6 | $25–180 |
+| 5. Lifts | 8–12 | $65–360 |
+| 6. Python API, viewer, docs, notebook | 4–8 | $30–240 |
+| **Total (all phases)** | **26–45** | **~$210–1,350, most likely ~$550** |
 
-Comparisons and add-ons:
+**Stairs only** (phases 1, 2 and the stair part of 6): about 7–13 sessions,
+**~$55–390**. Under the first version of this plan, stairs as walkable areas
+were estimated at $250–1,500, because floors, connectors, 3D positions
+and routing all had to be built. Upstream has now built them.
 
-* **Stairs as a "portal with a time delay"**: phase 3 drops to 3–5 sessions and
-  phase 5 to 1–2, for a total of **~$185–1,150**. Stairs as walkable areas cost
-  roughly **$60–360 more** at API rates.
-* **Escalators / moving walkways**: +3–6 sessions, **+$25–180**.
-* **Lifts**: +8–12 sessions, **+$65–360**.
+What moves the number:
 
-### What moves the number
+* **Upstream churn.** The multi-floor API is explicitly unfinished. Work
+  that lands on code upstream then rewrites has to be redone. Allow
+  about 20% extra, and agree the plan with upstream first (section 3).
+* **Debugging loops.** Phases 3 and 5 have the most new logic and the widest
+  cost range.
+* **Build and test output.** CGAL compile errors and long test logs sent back
+  to Claude add input tokens. Filtering them helps.
+* **Model choice.** Sonnet 5 costs roughly half as much per token, but may need
+  more attempts on phases 3 and 5.
 
-* **Debugging loops dominate.** Portal crossing and cross-portal neighbour
-  handling (phase 3) is where the high end comes from. Good unit tests written
-  up front shorten these loops.
-* **Context size.** Long sessions re-read a large context on every call. Short,
-  single-purpose sessions (one PR, one phase) keep this down.
-* **C++ build and test output.** Long CGAL compile errors or verbose test logs
-  sent back to Claude add input tokens. Filtering build output helps.
-* **Effort level.** Higher effort means more thinking (output) tokens: more
-  expensive per call, but usually fewer failed attempts on hard phases.
-* **Model choice.** Sonnet 5 ($2 / $10 per million tokens) costs roughly
-  half as much per token. On the harder phases (3 and 4) it may need more
-  iterations, so compare it on a real phase before switching.
-
-### Not included
-
-* Your own review and testing time.
-* CI compute.
-* Calibrating stair speed factors against measured data.
+Not included: your own review and testing time, CI compute, and calibrating
+stair speed factors against measured data.
